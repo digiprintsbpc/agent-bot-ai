@@ -63,11 +63,22 @@ async function sbQuery({ table, select = '*', filter = {}, order, limit = 20 }) 
   const p = new URLSearchParams({ select, limit: String(limit) });
   for (const [k, v] of Object.entries(filter)) p.append(k, v);
   if (order) p.append('order', order);
-  const res = await fetch(`${SB_URL}/rest/v1/${table}?${p}`, {
-    headers: { apikey: SB_KEY },
-  });
-  if (!res.ok) throw new Error(`Supabase ${res.status}`);
-  return res.json();
+  // Retry 3x dengan backoff untuk atasi intermittent failure
+  let lastErr;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await fetch(`${SB_URL}/rest/v1/${table}?${p}`, {
+        headers: { apikey: SB_KEY },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) throw new Error(`Supabase ${res.status}`);
+      return await res.json();
+    } catch (e) {
+      lastErr = e;
+      if (i < 2) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+  throw lastErr;
 }
 
 /**
