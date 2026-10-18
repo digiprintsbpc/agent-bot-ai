@@ -44,7 +44,17 @@ async function sbPatch(table, params, body) {
 async function getSession(userId) {
   try {
     const rows = await sbGet('order_sessions', { select: '*', user_id: `eq.${userId}` });
-    return rows[0] || null;
+    const s = rows[0] || null;
+    if (!s) return null;
+    // Bug #8: sesi basi diabaikan (order di DB tetap aman, user mulai fresh).
+    // Batas: 6 jam untuk step pembayaran/konfirmasi, 24 jam untuk lainnya.
+    const ageMs = Date.now() - new Date(s.updated_at).getTime();
+    const limitH = ['awaiting_payment', 'qris_failed', 'confirm', 'processing_order'].includes(s.step) ? 6 : 24;
+    if (!Number.isNaN(ageMs) && ageMs > limitH * 3600 * 1000) {
+      await clearSession(userId);
+      return null;
+    }
+    return s;
   } catch { return null; }
 }
 async function saveSession(userId, step, draft) {
@@ -60,6 +70,29 @@ async function clearSession(userId) {
       method: 'DELETE', headers: sbHeaders(),
     });
   } catch {}
+}
+
+// Bug #6: normalisasi nomor WA agar "0812…" dan "62812…" tidak jadi customer ganda.
+function normPhone(s) {
+  let c = String(s || '').replace(/\D/g, '');
+  if (c.startsWith('0')) c = '62' + c.slice(1);
+  else if (/^8/.test(c)) c = '62' + c;
+  return c.slice(0, 16);
+}
+
+// Bug #1: klaim atomik sesi confirm — hanya satu proses yang boleh lanjut ke createOrder.
+// PATCH bersyarat: hanya baris yang masih step=confirm yang terupdate.
+async function claimConfirmSession(userId) {
+  try {
+    const res = await fetch(`${SB_URL}/rest/v1/order_sessions?user_id=eq.${userId}&step=eq.confirm`, {
+      method: 'PATCH',
+      headers: { ...sbHeaders(), Prefer: 'return=representation' },
+      body: JSON.stringify({ step: 'processing_order', updated_at: new Date().toISOString() }),
+    });
+    if (!res.ok) return false;
+    const rows = await res.json();
+    return Array.isArray(rows) && rows.length > 0;
+  } catch { return false; }
 }
 
 // ---------- Produk ----------
@@ -113,6 +146,10 @@ async function parseMessage(text, products, session) {
   if (!d.phone) missing.push('no WA');
   if (!d.address) missing.push('alamat');
 
+  // Riwayat percakapan terakhir untuk konteks (maks 20 pertukaran = 40 pesan)
+  const hist = Array.isArray(d.history) ? d.history.slice(-40) : [];
+  const histText = hist.map((h) => `${h.role === 'user' ? 'Pelanggan' : 'Bot'}: ${h.text}`).join('\n');
+
   const prompt = `Kamu asisten order toko cetak "Digiprint" (nota NCR, kwitansi). Bicara Bahasa Indonesia kasual & ramah.
 Tugas: pahami pesan pelanggan, ekstrak info pesanan.
 
@@ -122,8 +159,9 @@ ${products.map((p) => `${p.id} | ${p.nama} | ${rp(p.harga)}`).join('\n')}
 STATUS: step=${step}
 SUDAH TERKUMPUL: produk=${d.product_nama || d.product_hint || '-'} qty=${d.qty || '-'} nama=${d.name || '-'} wa=${d.phone || '-'} alamat=${d.address || '-'}
 MASIH KURANG: ${missing.join(', ') || 'lengkap'}
-
+${histText ? `\nRIWAYAT PERCAKAPAN:\n${histText}\n` : ''}
 ATURAN:
+- Gunakan RIWAYAT PERCAKAPAN untuk memahami konteks. "yang 1ply saja" setelah tanya harga "1/4 50 lembar" = nota 1/4 folio 1ply 50 lembar. Jangan tanya ulang info yang sudah disebut.
 - Cocokkan produk yang dimaksud ke salah satu ID (fuzzy: "nota setengah folio 2 ply" → produk nota 1/2 folio 2ply). Kalau tipe produk jelas tapi varian belum (mis. "1/4 2ply" bisa 50 atau 100 lembar) → product_id null TAPI isi product_hint dengan tipe-nya ("1/4 2ply"). Kalau tidak jelas sama sekali → keduanya null.
 - qty: angka jumlah. null bila tidak disebut.
 - intent: order (mau pesan), ask (tanya produk/harga), track (tanya status pesanan / menyebut INV-), paid (bilang sudah bayar/lunas), cancel (batal), greeting (salam), other.
@@ -144,13 +182,20 @@ PESAN PELANGGAN: """${text}"""`;
   }
 }
 
-// ---------- Buat pesanan ----------
-function genOrderId() {
-  return 'INV-' + Math.floor(100000 + Math.random() * 900000);
+// Bug #2: ID pesanan dicek ke DB dulu agar tidak tabrakan.
+async function genOrderId() {
+  for (let i = 0; i < 5; i++) {
+    const id = 'INV-' + Math.floor(100000 + Math.random() * 900000);
+    try {
+      const rows = await sbGet('orders', { select: 'id', id: `eq.${id}`, limit: 1 });
+      if (!rows.length) return id;
+    } catch { return id; } // DB tak terjangkau → pakai apa adanya
+  }
+  return 'INV-' + Date.now().toString(36).toUpperCase().slice(-6);
 }
 
 async function createOrder(draft) {
-  const orderId = genOrderId();
+  const orderId = await genOrderId();
   const total = Math.round(Number(draft.harga) * Number(draft.qty));
 
   // customer: cari by WA, buat bila belum ada
@@ -198,6 +243,20 @@ async function createOrder(draft) {
 function orderSummary(d) {
   const sub = Math.round(Number(d.harga) * Number(d.qty));
   return `📝 *Ringkasan pesanan:*\n• ${d.product_nama} — ${d.qty} × ${rp(d.harga)} = ${rp(sub)}\n• Nama: ${d.name}\n• WA: ${d.phone}\n• Alamat: ${d.address}\n\n*Total: ${rp(sub)}*`;
+}
+
+// Bug #3: "YA" terlalu kaku — terima "ya kak", "iya dong", dst.
+const FILLER_WORDS = new Set(['kak', 'dong', 'aja', 'saja', 'sih', 'lah', 'yaudah', 'yauda', 'bang', 'mas', 'mbak', 'pak', 'bu']);
+const YES_WORDS = new Set(['ya', 'iya', 'oke', 'ok', 'okay', 'setuju', 'lanjut', 'betul', 'benar', 'jadi', 'jadiin', 'siap', 'deal', 'gas', 'baik']);
+const QUESTION_WORDS = new Set(['kapan', 'dimana', 'kenapa', 'mengapa', 'bagaimana', 'gimana', 'berapa', 'apa', 'apakah', 'siapa', 'mana', 'kok']);
+function isYes(text) {
+  const t = String(text || '').toLowerCase();
+  if (t.includes('?')) return false; // pertanyaan ("kapan ya?") bukan konfirmasi
+  const tokens = t.replace(/[^a-z\s]/g, ' ')
+    .split(/\s+/).filter(Boolean).filter((x) => !FILLER_WORDS.has(x));
+  if (!tokens.length) return false;
+  if (tokens.some((x) => QUESTION_WORDS.has(x))) return false;
+  return YES_WORDS.has(tokens[0]) || tokens.every((x) => YES_WORDS.has(x));
 }
 
 // ---------- Handler utama ----------
@@ -288,12 +347,28 @@ async function handleCustomer(userId, text, onPhoto) {
       if (!res.ok) return `Belum bisa cek pembayaran: ${res.error}. Coba lagi sebentar ya kak.`;
       return 'Pembayarannya belum terdeteksi kak. Pastikan sudah scan QR & bayar, lalu ketik *SUDAH BAYAR* lagi.';
     }
+    // Bug #5: customer mau mulai pesanan baru padahal masih menunggu bayar.
+    // Pesanan lama TIDAK dibatalkan diam-diam — hanya bila customer memilih PESAN BARU.
+    if (/^(pesan baru|buat baru|mulai baru|order baru)$/i.test(q)) {
+      await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'batal' }).catch(() => {});
+      await clearSession(userId);
+      return 'Baik kak, pesanan lama sudah dibatalkan. Mau pesan produk apa? 😊';
+    }
+    if (/^lanjut bayar$/i.test(q)) {
+      return 'Silakan scan QRIS di atas untuk membayar ya kak. Setelah bayar, ketik *SUDAH BAYAR*.';
+    }
+    if (/pesan (lagi|baru)|order (lagi|baru)|mau (beli|pesan)|tambah pesanan|buat pesanan/i.test(q)) {
+      return `Pesanan *${d.order_id}* masih menunggu pembayaran kak.\n\nKetik *LANJUT BAYAR* untuk selesaikan pembayaran ini, atau *PESAN BARU* untuk batalkan pesanan ini & mulai dari awal.`;
+    }
     return 'Silakan scan QRIS di atas untuk membayar ya kak. Setelah bayar, ketik *SUDAH BAYAR*.';
   }
 
   // Step: konfirmasi
   if (session.step === 'confirm') {
-    if (/^(ya|iya|oke|ok|setuju|lanjut|betul|benar)$/i.test(q)) {
+    if (isYes(q)) {
+      // Bug #1: klaim atomik — dua "YA" cepat hanya satu yang lolos.
+      const claimed = await claimConfirmSession(userId);
+      if (!claimed) return 'Pesananmu sedang diproses ya kak, tunggu sebentar 😊';
       try {
         const r = await createOrder(d);
         if (OWNER_ID) {
@@ -315,6 +390,8 @@ async function handleCustomer(userId, text, onPhoto) {
         await saveSession(userId, 'qris_failed', { ...d, order_id: r.orderId, amount: r.total });
         return `Pesanan *${r.orderId}* sudah tercatat, tapi QRIS gagal dibuat (${r.qrisError || 'unknown'}).\nKetik *COBA LAGI* untuk coba lagi, atau admin akan menghubungimu ya kak.`;
       } catch (e) {
+        // Kembalikan sesi ke confirm agar customer bisa coba lagi (bug #1).
+        await saveSession(userId, 'confirm', d);
         console.error('[customer] createOrder gagal:', e.message);
         return 'Maaf kak, pesanan gagal dibuat. Coba lagi atau hubungi admin ya.';
       }
@@ -345,15 +422,33 @@ async function handleCustomer(userId, text, onPhoto) {
 
   const p = await parseMessage(q, products, session);
 
+  // Simpan riwayat untuk konteks turn berikutnya (user msg sudah di prompt, tambah bot reply nanti)
+  d.history = Array.isArray(d.history) ? d.history : [];
+  d.history.push({ role: 'user', text: q.slice(0, 200) });
+  if (d.history.length > 40) d.history = d.history.slice(-40);
+  // Helper: simpan bot reply ke history + persist session
+  const saveHist = async (step, botReply) => {
+    if (botReply) {
+      d.history.push({ role: 'bot', text: String(botReply).slice(0, 200) });
+      if (d.history.length > 40) d.history = d.history.slice(-40);
+    }
+    await saveSession(userId, step, d);
+  };
+
   // Terapkan slot ke draft
   if (p.product_id) {
     const prod = products.find((x) => x.id === p.product_id);
     if (prod) { d.product_id = prod.id; d.product_nama = prod.nama; d.harga = Number(prod.harga); d.product_hint = null; }
   }
   if (p.product_hint && !d.product_id) d.product_hint = String(p.product_hint).slice(0, 60);
-  if (p.qty && Number(p.qty) > 0) d.qty = Math.floor(Number(p.qty));
+  // Bug #4: qty bisa datang sebagai teks ("100 lembar") — ambil digitnya.
+  if (p.qty !== null && p.qty !== undefined && String(p.qty).trim() !== '') {
+    const m = String(p.qty).match(/\d+/);
+    const n = m ? parseInt(m[0], 10) : 0;
+    if (n > 0) d.qty = n;
+  }
   if (p.name) d.name = String(p.name).slice(0, 80);
-  if (p.phone) d.phone = String(p.phone).replace(/\D/g, '').slice(0, 16);
+  if (p.phone) d.phone = normPhone(p.phone); // Bug #6: 08xx → 628xx
   if (p.address) d.address = String(p.address).slice(0, 200);
 
   if (p.intent === 'cancel') {
