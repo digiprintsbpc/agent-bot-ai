@@ -450,6 +450,23 @@ async function handleMessage(chatId, msg) {
     if (text.startsWith('!')) return handleMarketplace(chatId, text);
     // Template order terisi
     if (text.includes('TEMPLATE ORDER') || text.includes('FORM PEMESANAN')) return handleTemplateOrder(chatId, text);
+
+    // ===== FITUR JUALAN: kirim PDF/invoice ke customer (bahasa natural) =====
+    // Cth: "bisakah kamu kirimkan ke customer format pdf?", "kirim invoice ke wa customer", "generate pdf"
+    if (/kirim.*(pdf|invoice)|(pdf|invoice).*(kirim|customer|pelanggan)|generate.*(pdf|invoice)|(pdf|invoice).*generate/i.test(text)) {
+      // Cari INV-xxx di pesan ini atau state terakhir
+      let orderId = (text.match(/INV-\d{6}/i) || [])[0];
+      if (!orderId) {
+        const st2 = await getAdminState(chatId).catch(() => null);
+        orderId = st2?.data?.lastOrderId || null;
+      }
+      if (!orderId) {
+        return tg.sendMessage(chatId,
+          '📄 *Kirim PDF ke customer*\n\nNomor pesanannya yang mana? (cth: `INV-123456`)', MD);
+      }
+      return handleInvoiceToWA(chatId, orderId.toUpperCase());
+    }
+
     return null; // teks bebas → asisten AI
   }
 
@@ -774,6 +791,53 @@ async function handleInvoice(chatId, orderId) {
     await logActivity('invoice', `Invoice ${orderId} dibuat & dikirim ke admin.`);
   } catch (e) {
     await tg.editMessageText(chatId, waitMsg.message_id, `❌ *Gagal buat invoice:* ${e.message}`, MD).catch(() => {});
+  }
+}
+
+// ---------- FITUR JUALAN: kirim invoice PDF ke WA customer ----------
+async function handleInvoiceToWA(chatId, orderId) {
+  const waitMsg = await tg.sendMessage(chatId, '⏳ _Membuat invoice & mengirim ke WA customer..._', MD);
+  try {
+    const { generateInvoice } = require('./invoice');
+    const orders = await sbGet('orders', {
+      select: 'id,tanggal,nama_penerima,nomor_wa,alamat_lengkap,total_harga,status',
+      id: `eq.${orderId}`, limit: 1,
+    });
+    if (!orders[0]) {
+      await tg.editMessageText(chatId, waitMsg.message_id, `❌ Order *${orderId}* tidak ditemukan.`, MD);
+      return;
+    }
+    const order = orders[0];
+    const toWa = formatWA(order.nomor_wa);
+    if (!toWa || toWa.length < 10) {
+      await tg.editMessageText(chatId, waitMsg.message_id, `❌ Nomor WA customer tidak valid.`, MD);
+      return;
+    }
+    const items = await sbGet('order_items', {
+      select: 'nama_produk,qty,harga_satuan', order_id: `eq.${orderId}`,
+    }).catch(() => []);
+    const pdfBuffer = await generateInvoice({ ...order, items });
+
+    // Upload ke Supabase Storage (bucket 'invoices', public)
+    const fileName = `Invoice-${orderId}-${Date.now()}.pdf`;
+    const upRes = await fetch(`${SB_URL}/storage/v1/object/invoices/${fileName}`, {
+      method: 'POST',
+      headers: { ...sbHeaders(), 'Content-Type': 'application/pdf' },
+      body: pdfBuffer,
+    });
+    if (!upRes.ok) {
+      const t = await upRes.text().catch(() => '');
+      throw new Error(`Upload storage gagal (${upRes.status}): ${t.slice(0, 120)}`);
+    }
+    const publicUrl = `${SB_URL}/storage/v1/object/public/invoices/${fileName}`;
+
+    // Antrekan ke WA sebagai dokumen
+    await queueWA(toWa, 'document', publicUrl, `Invoice-${orderId}.pdf`);
+    await logActivity('invoice_wa', `Invoice ${orderId} dikirim ke WA ${toWa}.`);
+    await tg.editMessageText(chatId, waitMsg.message_id,
+      `✅ *Invoice ${orderId} masuk antrean WA*\nTujuan: ${order.nama_penerima} (${toWa})\nPanel akan mengirim PDF-nya via WhatsApp.`, MD);
+  } catch (e) {
+    await tg.editMessageText(chatId, waitMsg.message_id, `❌ *Gagal:* ${e.message}`, MD).catch(() => {});
   }
 }
 
