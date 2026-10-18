@@ -1,12 +1,15 @@
 'use strict';
 /**
- * lib/customer.js — MODE PELANGGAN: pesan barang + QRIS + cek bayar.
- * Aktif untuk chat selain TELEGRAM_ALLOWED_ID (owner).
- * State machine disimpan di tabel order_sessions (Supabase).
+ * lib/admin.js — MENU ADMIN, port 1:1 dari toko-bot/telegram.js (bot lama).
+ * Satu bot, dua tampilan: modul ini KHUSUS owner (TELEGRAM_ALLOWED_ID).
+ * - State: tabel admin_states (bukan memory, karena serverless)
+ * - Profil toko: tabel store_profile (bukan JSON file)
+ * - Kirim WA: tabel wa_outbox (panel/Baileys yang kirim)
+ * - Teks & tombol dibuat SAMA PERSIS dengan bot lama.
  */
 
-const { chat } = require('./llm');
-const { sendMessage, sendPhoto } = require('./telegram-api');
+const tg = require('./telegram-api');
+const { ocrImage, extractResiInfo } = require('./ocr');
 const payinaja = require('./payinaja');
 
 const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
@@ -14,21 +17,17 @@ const SB_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const OWNER_ID = String(process.env.TELEGRAM_ALLOWED_ID || '');
 
 const sbHeaders = () => ({ apikey: SB_KEY, 'Content-Type': 'application/json' });
-
 async function sbGet(table, params = {}) {
   const q = new URLSearchParams(params);
   const res = await fetch(`${SB_URL}/rest/v1/${table}?${q}`, { headers: sbHeaders() });
-  if (!res.ok) throw new Error(`Supabase GET ${table}: ${res.status}`);
+  if (!res.ok) throw new Error(`SB GET ${table} ${res.status}`);
   return res.json();
 }
 async function sbPost(table, rows, prefer = 'return=representation') {
   const res = await fetch(`${SB_URL}/rest/v1/${table}`, {
     method: 'POST', headers: { ...sbHeaders(), Prefer: prefer }, body: JSON.stringify(rows),
   });
-  if (!res.ok) {
-    const t = await res.text().catch(() => '');
-    throw new Error(`Supabase POST ${table}: ${res.status} ${t.slice(0, 120)}`);
-  }
+  if (!res.ok) throw new Error(`SB POST ${table} ${res.status}`);
   return prefer.includes('return=representation') ? res.json() : [];
 }
 async function sbPatch(table, params, body) {
@@ -36,531 +35,969 @@ async function sbPatch(table, params, body) {
   const res = await fetch(`${SB_URL}/rest/v1/${table}?${q}`, {
     method: 'PATCH', headers: sbHeaders(), body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`Supabase PATCH ${table}: ${res.status}`);
+  if (!res.ok) throw new Error(`SB PATCH ${table} ${res.status}`);
   return true;
 }
-async function sbDelete(table, params) {
+async function sbDel(table, params) {
   const q = new URLSearchParams(params);
-  const res = await fetch(`${SB_URL}/rest/v1/${table}?${q}`, {
-    method: 'DELETE', headers: sbHeaders(),
-  });
-  if (!res.ok) throw new Error(`Supabase DELETE ${table}: ${res.status}`);
-  return true;
+  await fetch(`${SB_URL}/rest/v1/${table}?${q}`, { method: 'DELETE', headers: sbHeaders() }).catch(() => {});
 }
 
-// ---------- Sesi ----------
-async function getSession(userId) {
+// ---------- State admin ----------
+async function getAdminState(userId) {
   try {
-    const rows = await sbGet('order_sessions', { select: '*', user_id: `eq.${userId}` });
-    const s = rows[0] || null;
-    if (!s) return null;
-    // Bug #8: sesi basi diabaikan (order di DB tetap aman, user mulai fresh).
-    // Batas: 6 jam untuk step pembayaran/konfirmasi, 24 jam untuk lainnya.
-    const ageMs = Date.now() - new Date(s.updated_at).getTime();
-    const limitH = ['awaiting_payment', 'qris_failed', 'confirm', 'processing_order'].includes(s.step) ? 6 : 24;
-    if (!Number.isNaN(ageMs) && ageMs > limitH * 3600 * 1000) {
-      await clearSession(userId);
-      return null;
-    }
-    return s;
+    const rows = await sbGet('admin_states', { select: '*', user_id: `eq.${userId}` });
+    return rows[0] || null;
   } catch { return null; }
 }
-async function saveSession(userId, step, draft) {
-  try {
-    await sbPost('order_sessions',
-      [{ user_id: String(userId), step, draft, updated_at: new Date().toISOString() }],
-      'resolution=merge-duplicates,return=minimal');
-  } catch (e) { console.error('[session] save gagal:', e.message); }
+async function setAdminState(userId, step, data = {}) {
+  await sbPost('admin_states',
+    [{ user_id: String(userId), step, data, updated_at: new Date().toISOString() }],
+    'resolution=merge-duplicates,return=minimal').catch(() => {});
 }
-async function clearSession(userId) {
-  try {
-    await fetch(`${SB_URL}/rest/v1/order_sessions?user_id=eq.${userId}`, {
-      method: 'DELETE', headers: sbHeaders(),
-    });
-  } catch {}
+async function clearAdminState(userId) {
+  await sbDel('admin_states', { user_id: `eq.${userId}` });
 }
 
-// Bug #6: normalisasi nomor WA agar "0812…" dan "62812…" tidak jadi customer ganda.
-function normPhone(s) {
-  let c = String(s || '').replace(/\D/g, '');
-  if (c.startsWith('0')) c = '62' + c.slice(1);
-  else if (/^8/.test(c)) c = '62' + c;
-  return c.slice(0, 16);
-}
-
-// Bug #1: klaim atomik sesi confirm — hanya satu proses yang boleh lanjut ke createOrder.
-// PATCH bersyarat: hanya baris yang masih step=confirm yang terupdate.
-async function claimConfirmSession(userId) {
-  try {
-    const res = await fetch(`${SB_URL}/rest/v1/order_sessions?user_id=eq.${userId}&step=eq.confirm`, {
-      method: 'PATCH',
-      headers: { ...sbHeaders(), Prefer: 'return=representation' },
-      body: JSON.stringify({ step: 'processing_order', updated_at: new Date().toISOString() }),
-    });
-    if (!res.ok) return false;
-    const rows = await res.json();
-    return Array.isArray(rows) && rows.length > 0;
-  } catch { return false; }
-}
-
-// ---------- Produk ----------
-async function getProducts() {
-  const rows = await sbGet('products', { select: 'id,nama,harga', order: 'nama' });
-  return rows;
-}
+// ---------- Helpers (sama seperti bot lama) ----------
 const rp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
-function catalogText(products) {
-  return products.map((p) => `- ${p.nama} — ${rp(p.harga)}`).join('\n');
+function formatWA(wa) {
+  let clean = String(wa).replace(/[^0-9]/g, '');
+  if (clean.startsWith('0')) clean = '62' + clean.substring(1);
+  if (!clean.startsWith('62')) clean = '62' + clean;
+  return clean;
 }
-// Versi ringkas untuk ditampilkan ke pelanggan: dikelompokkan per ukuran
-function catalogCompact(products) {
-  const lines = [];
-  for (const s of ['1/2', '1/3', '1/4', '1/6', '1/8', '1/10']) {
-    const items = products.filter((p) => p.nama.startsWith(`Nota ${s} folio`));
-    if (!items.length) continue;
-    lines.push(`*${s} folio:*`);
-    for (const ply of [1, 2, 3]) {
-      const p50 = items.find((p) => p.nama.includes(`${ply}ply (50 lembar)`));
-      const p100 = items.find((p) => p.nama.includes(`${ply}ply (100 lbr)`));
-      lines.push(`• ${ply}ply — 50 lbr ${p50 ? rp(p50.harga) : '-'} | 100 lbr ${p100 ? rp(p100.harga) : '-'}`);
-    }
-  }
-  const rims = products.filter((p) => p.kategori === 'Paket Rim');
-  if (rims.length) {
-    lines.push(`*Paket 1 rim (free ongkir Malang):*`);
-    for (const r of rims) {
-      const ply = r.nama.match(/(\d)ply/);
-      lines.push(`• ${ply ? ply[1] + 'ply' : r.nama} — ${rp(r.harga)}`);
-    }
-  }
-  return lines.join('\n');
+function getEstimasi(alamat) {
+  const str = String(alamat || '').toLowerCase();
+  if (str.match(/jawa|jatim|jateng|jabar|jakarta|banten/)) return 3;
+  if (str.match(/bali|sumatera|ntb/)) return 5;
+  return 4;
 }
-
-// ---------- Parse LLM ----------
-function parseJson(s) {
+function fmtTgl(iso) {
   try {
-    const m = String(s).match(/\{[\s\S]*\}/);
-    return m ? JSON.parse(m[0]) : null;
-  } catch { return null; }
+    const d = new Date(iso);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`;
+  } catch { return '-'; }
+}
+// status DB <-> tampilan (bot lama pakai emoji)
+const DISP = { pending: 'Belum Bayar 🔴', diproses: 'Diproses ⚙️', dikirim: 'Dikirim 🚚', selesai: 'Selesai 🥰', batal: 'Batal ❌' };
+const DBST = { 'belum': 'pending', 'diproses': 'diproses', 'dikirim': 'dikirim', 'selesai': 'selesai', 'batal': 'batal' };
+function dispStatus(s) { return DISP[s] || s; }
+function dbStatus(s) {
+  s = String(s || '');
+  if (DISP[s]) return s;
+  for (const k of Object.keys(DBST)) if (s.toLowerCase().includes(k)) return DBST[k];
+  return 'pending';
 }
 
-async function parseMessage(text, products, session) {
-  const d = session?.draft || {};
-  const step = session?.step || 'idle';
-  const missing = [];
-  if (!d.product_id) missing.push('produk');
-  if (!d.qty) missing.push('jumlah');
-  if (!d.name) missing.push('nama');
-  if (!d.phone) missing.push('no WA');
-  if (!d.address) missing.push('alamat');
-
-  // Riwayat percakapan terakhir untuk konteks (maks 20 pertukaran = 40 pesan)
-  const hist = Array.isArray(d.history) ? d.history.slice(-40) : [];
-  const histText = hist.map((h) => `${h.role === 'user' ? 'Pelanggan' : 'Bot'}: ${h.text}`).join('\n');
-
-  const prompt = `Kamu asisten order toko cetak "Digiprint" (nota NCR, kwitansi). Bicara Bahasa Indonesia kasual & ramah.
-Tugas: pahami pesan pelanggan, ekstrak info pesanan.
-
-DAFTAR PRODUK (id | nama | harga):
-${products.map((p) => `${p.id} | ${p.nama} | ${rp(p.harga)}`).join('\n')}
-
-STATUS: step=${step}
-SUDAH TERKUMPUL: produk=${d.product_nama || d.product_hint || '-'} qty=${d.qty || '-'} nama=${d.name || '-'} wa=${d.phone || '-'} alamat=${d.address || '-'}
-MASIH KURANG: ${missing.join(', ') || 'lengkap'}
-${histText ? `\nRIWAYAT PERCAKAPAN:\n${histText}\n` : ''}
-ATURAN:
-- Gunakan RIWAYAT PERCAKAPAN untuk memahami konteks. "yang 1ply saja" setelah tanya harga "1/4 50 lembar" = nota 1/4 folio 1ply 50 lembar. Jangan tanya ulang info yang sudah disebut.
-- Cocokkan produk yang dimaksud ke salah satu ID (fuzzy: "nota setengah folio 2 ply" → produk nota 1/2 folio 2ply). Kalau tipe produk jelas tapi varian belum (mis. "1/4 2ply" bisa 50 atau 100 lembar) → product_id null TAPI isi product_hint dengan tipe-nya ("1/4 2ply"). Kalau tidak jelas sama sekali → keduanya null.
-- qty: angka jumlah. null bila tidak disebut.
-- intent: order (mau pesan), ask (tanya produk/harga), track (tanya status pesanan / menyebut INV-), paid (bilang sudah bayar/lunas), cancel (batal), greeting (salam), other.
-- confirmed: true bila pelanggan menyetujui ("ya", "oke", "setuju"), false bila menolak ("tidak", "batal"), null bila tidak ada.
-- reply: balasan natural 1-3 kalimat. Bila masih ada yang kurang dan step collecting/idle, tanyakan SATU hal yang paling penting berikutnya. Jangan mengarang harga.
-
-Balas HANYA JSON valid:
-{"intent":"order","product_id":null,"product_hint":null,"qty":null,"name":null,"phone":null,"address":null,"confirmed":null,"reply":"..."}
-
-PESAN PELANGGAN: """${text}"""`;
-
+// Baris order format bot lama: [id,tgl,nama,wa,alamat,pesanan,total,statusDisplay,resi]
+function orderToRow(o) {
+  return [o.id, fmtTgl(o.tanggal), o.nama_penerima, o.nomor_wa, o.alamat_lengkap,
+    '', Number(o.total_harga), dispStatus(o.status), o.nomor_resi || ''];
+}
+async function getAllData() {
+  const orders = await sbGet('orders', { select: 'id,tanggal,nama_penerima,nomor_wa,alamat_lengkap,nomor_resi,total_harga,status', order: 'tanggal.desc', limit: 500 });
+  return { success: true, data: [['ID', 'Tanggal', 'Nama', 'WA', 'Alamat', 'Pesanan', 'Total', 'Status', 'Resi'], ...orders.map(orderToRow)] };
+}
+async function getOrderItems(orderId) {
   try {
-    const out = await chat([{ role: 'user', content: prompt }], { maxTokens: 600, temperature: 0.2 });
-    return parseJson(out) || { intent: 'other', reply: 'Maaf kak, bisa diulangi? 😊' };
-  } catch (e) {
-    console.error('[customer] parse gagal:', e.message);
-    return { intent: 'other', reply: 'Maaf kak, ada gangguan sebentar. Coba lagi ya.' };
-  }
+    return await sbGet('order_items', { select: 'nama_produk,qty,harga_satuan', order_id: `eq.${orderId}` });
+  } catch { return []; }
 }
-
-// Bug #2: ID pesanan dicek ke DB dulu agar tidak tabrakan.
-async function genOrderId() {
-  for (let i = 0; i < 5; i++) {
-    const id = 'INV-' + Math.floor(100000 + Math.random() * 900000);
-    try {
-      const rows = await sbGet('orders', { select: 'id', id: `eq.${id}`, limit: 1 });
-      if (!rows.length) return id;
-    } catch { return id; } // DB tak terjangkau → pakai apa adanya
-  }
-  return 'INV-' + Date.now().toString(36).toUpperCase().slice(-6);
+async function updateStatus(id, status) {
+  await sbPatch('orders', { id: `eq.${id}` }, { status: dbStatus(status) });
 }
-
-async function createOrder(draft) {
-  const orderId = await genOrderId();
-  const total = Math.round(Number(draft.harga) * Number(draft.qty));
-
-  // customer: cari by WA, buat bila belum ada
-  let customerId = null;
+async function updateResi(id, link) {
+  await sbPatch('orders', { id: `eq.${id}` }, { nomor_resi: link });
+}
+async function getSemuaProduk() {
+  const prods = await sbGet('products', { select: 'id,nama', order: 'id' });
+  return { success: true, data: [['ID', 'Nama'], ...prods.map((p) => [p.id, p.nama])] };
+}
+async function getProduk(id) {
+  const rows = await sbGet('products', { select: '*', id: `eq.${String(id).toUpperCase()}` });
+  const p = rows[0];
+  if (!p) return null;
+  return { id: p.id, nama: p.nama, kat: p.kategori, desc: p.deskripsi, hrg: p.harga, stok: p.stok, link: p.link_gambar };
+}
+async function saveProduk(d) {
+  await sbPost('products', [{
+    id: String(d.id).toUpperCase(), nama: d.nama, kategori: d.kat, deskripsi: d.desc,
+    harga: Number(String(d.hrg).replace(/[^0-9]/g, '')) || 0,
+    stok: parseInt(d.stok, 10) || 0, link_gambar: d.link || null,
+  }], 'resolution=merge-duplicates,return=minimal');
+}
+async function getProfile() {
   try {
-    const found = await sbGet('customers', { select: 'id', nomor_wa: `eq.${draft.phone}`, limit: 1 });
-    customerId = found[0]?.id || null;
+    const rows = await sbGet('store_profile', { select: '*', id: 'eq.1' });
+    if (rows[0]) return { nama: rows[0].nama, alamat: rows[0].alamat, kontak: rows[0].kontak, logo: rows[0].logo };
   } catch {}
-  if (!customerId) {
-    try {
-      const created = await sbPost('customers', [{ nama: draft.name, nomor_wa: draft.phone, alamat_lengkap: draft.address }]);
-      customerId = created[0]?.id || null;
-    } catch (e) { console.error('[customer] buat customer gagal:', e.message); }
-  }
-
-  await sbPost('orders', [{
-    id: orderId,
-    customer_id: customerId,
-    nama_penerima: draft.name,
-    nomor_wa: draft.phone,
-    alamat_lengkap: draft.address,
-    total_harga: total,
-    status: 'pending',
-  }]);
-  await sbPost('order_items', [{
-    order_id: orderId,
-    product_id: draft.product_id,
-    nama_produk: draft.product_nama,
-    qty: Number(draft.qty),
-    harga_satuan: Number(draft.harga),
-  }]);
-
-  // QRIS PayinAja
-  let trxId = null;
-  let qrUrl = null;
-  const qris = await payinaja.createQRIS(total, orderId, draft.name, draft.phone);
-  if (qris.ok) {
-    trxId = qris.trx_id;
-    qrUrl = qris.qr_image_url;
-    await sbPatch('orders', { id: `eq.${orderId}` }, { payment_trx_id: trxId }).catch(() => {});
-  }
-  return { orderId, total, trxId, qrUrl, qrisError: qris.ok ? null : qris.error };
+  return { nama: 'Toko Cetak Custom', alamat: '-', kontak: '-', logo: '' };
 }
-
-function orderSummary(d) {
-  const sub = Math.round(Number(d.harga) * Number(d.qty));
-  return `📝 *Ringkasan pesanan:*\n• ${d.product_nama} — ${d.qty} × ${rp(d.harga)} = ${rp(sub)}\n• Nama: ${d.name}\n• WA: ${d.phone}\n• Alamat: ${d.address}\n\n*Total: ${rp(sub)}*`;
+async function saveProfile(p) {
+  await sbPatch('store_profile', { id: 'eq.1' }, { nama: p.nama, alamat: p.alamat, kontak: p.kontak, logo: p.logo || '' });
 }
-
-// Bug #3: "YA" terlalu kaku — terima "ya kak", "iya dong", dst.
-const FILLER_WORDS = new Set(['kak', 'dong', 'aja', 'saja', 'sih', 'lah', 'yaudah', 'yauda', 'bang', 'mas', 'mbak', 'pak', 'bu']);
-const YES_WORDS = new Set(['ya', 'iya', 'oke', 'ok', 'okay', 'setuju', 'lanjut', 'betul', 'benar', 'jadi', 'jadiin', 'siap', 'deal', 'gas', 'baik']);
-const QUESTION_WORDS = new Set(['kapan', 'dimana', 'kenapa', 'mengapa', 'bagaimana', 'gimana', 'berapa', 'apa', 'apakah', 'siapa', 'mana', 'kok']);
-function isYes(text) {
-  const t = String(text || '').toLowerCase();
-  if (t.includes('?')) return false; // pertanyaan ("kapan ya?") bukan konfirmasi
-  const tokens = t.replace(/[^a-z\s]/g, ' ')
-    .split(/\s+/).filter(Boolean).filter((x) => !FILLER_WORDS.has(x));
-  if (!tokens.length) return false;
-  if (tokens.some((x) => QUESTION_WORDS.has(x))) return false;
-  return YES_WORDS.has(tokens[0]) || tokens.every((x) => YES_WORDS.has(x));
-}
-
-// ---------- Handler utama ----------
-// onPhoto(url, caption): bila diisi, foto QRIS diserahkan ke pemanggil
-// (dipakai channel WA); bila kosong, dikirim via Telegram dan return null.
-async function handleCustomer(userId, text, onPhoto) {
-  const q = String(text || '').trim();
-
-  // --- AI Handoff: cek apakah AI sedang di-pause untuk customer ini ---
-  // (Rizal membalas manual via WA → AI diam sampai paused_until lewat)
-  try {
-    const pauseRows = await sbGet('ai_pause', { select: 'paused_until', user_id: `eq.${userId}` });
-    if (pauseRows[0] && pauseRows[0].paused_until) {
-      const until = new Date(pauseRows[0].paused_until).getTime();
-      if (Date.now() < until) {
-        console.log(`[ai-pause] diam untuk ${userId} sampai ${pauseRows[0].paused_until}`);
-        return null; // diam saja, jangan balas
-      }
-      // Pause sudah kedaluwarsa → hapus barisnya
-      await sbDelete('ai_pause', { user_id: `eq.${userId}` }).catch(() => {});
-    }
-  } catch (e) { console.error('[ai-pause] cek gagal:', e.message); }
-
-  let session = await getSession(userId);
-  if (!session) session = { user_id: String(userId), step: 'idle', draft: {} };
-  const d = session.draft || {};
-
-  // Perintah global: batal
-  if (/^(batal|gak jadi|nggak jadi|cancel)$/i.test(q)) {
-    if (d.order_id && session.step === 'awaiting_payment') {
-      await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'batal' }).catch(() => {});
-    }
-    await clearSession(userId);
-    return 'Baik kak, pesanan dibatalkan. Kalau butuh apa-apa, chat lagi aja ya 😊';
-  }
-
-  // Lacak pesanan: sebut INV-xxxxxx
-  const invMatch = q.match(/INV-\d{6}/i);
-  if (invMatch) {
-    try {
-      const rows = await sbGet('orders', { select: 'id,total_harga,status,tanggal,payment_trx_id', id: `eq.${invMatch[0].toUpperCase()}` });
-      if (rows[0]) {
-        const o = rows[0];
-        // Bila masih pending & ada trx QRIS (mis. order dari template admin) → cek pembayaran otomatis
-        if (o.status === 'pending' && o.payment_trx_id) {
-          const cek = await payinaja.checkTransaction(o.payment_trx_id).catch(() => ({ ok: false }));
-          if (cek.ok && cek.paid) {
-            await sbPatch('orders', { id: `eq.${o.id}` }, { status: 'diproses' }).catch(() => {});
-            o.status = 'diproses';
-            if (OWNER_ID) {
-              await sendMessage(OWNER_ID, `💰 *PEMBAYARAN MASUK!*\nInvoice: ${o.id}\nTotal: ${rp(o.total_harga)}\n🚦 Status: Diproses ⚙️`).catch(() => {});
-            }
-          }
-        }
-        const stMap = { pending: 'Belum Bayar 🔴', diproses: 'Diproses ⚙️', dikirim: 'Dikirim 🚚', selesai: 'Selesai 🥰', batal: 'Batal ❌' };
-        return `📦 *${o.id}*\nTotal: ${rp(o.total_harga)}\nStatus: ${stMap[o.status] || o.status}`;
-      }
-      return 'Nomor pesanan tidak ditemukan. Cek lagi ya kak.';
-    } catch {
-      return 'Maaf, tidak bisa cek status saat ini.';
-    }
-  }
-
-  // Step: QRIS gagal dibuat sebelumnya → bisa coba lagi
-  if (session.step === 'qris_failed') {
-    if (/dari awal|mulai lagi|ulang/i.test(q)) {
-      await clearSession(userId);
-      return 'Baik kak, kita mulai dari awal ya. Mau pesan produk apa? 😊';
-    }
-    if (/coba lagi|buat qris|ulangi|retry/i.test(q)) {
-      const qris = await payinaja.createQRIS(d.amount, d.order_id, d.name, d.phone);
-      if (qris.ok && qris.qr_image_url) {
-        await sbPatch('orders', { id: `eq.${d.order_id}` }, { payment_trx_id: qris.trx_id }).catch(() => {});
-        await saveSession(userId, 'awaiting_payment', { ...d, trx_id: qris.trx_id });
-        const caption = `🧾 *Pesanan ${d.order_id}*\n${d.product_nama} × ${d.qty}\n*Total: ${rp(d.amount)}*\n\nSilakan scan QRIS di atas untuk membayar. Setelah bayar, ketik *SUDAH BAYAR*.`;
-        if (onPhoto) { await onPhoto(qris.qr_image_url, caption); return null; }
-        await sendPhoto(userId, qris.qr_image_url, caption);
-        return null;
-      }
-      return `QRIS masih gagal dibuat (${(qris && qris.error) || 'unknown'}). Admin akan menghubungimu ya kak.`;
-    }
-    return `Pesanan *${d.order_id}* sudah tercatat. Ketik *COBA LAGI* untuk coba buat QRIS ulang, atau tunggu admin menghubungimu ya kak.`;
-  }
-
-  // Step: menunggu pembayaran
-  if (session.step === 'awaiting_payment') {
-    if (!d.trx_id) {
-      // Pengaman: tidak ada QRIS tapi nyasar ke sini → arahkan ke coba lagi
-      await saveSession(userId, 'qris_failed', d);
-      return `QRIS untuk pesanan *${d.order_id}* belum tersedia. Ketik *COBA LAGI* untuk coba lagi ya kak.`;
-    }
-    if (/sudah bayar|udah bayar|sudah lunas|udah lunas|lunas/i.test(q)) {
-      if (!d.trx_id) return 'Pesananmu belum ada QRIS-nya kak. Hubungi admin ya.';
-      const res = await payinaja.checkTransaction(d.trx_id);
-      if (res.ok && res.paid) {
-        await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'diproses' }).catch(() => {});
-        await clearSession(userId);
-        if (OWNER_ID) {
-          await sendMessage(OWNER_ID,
-            `💰 *PEMBAYARAN MASUK!*\nInvoice: ${d.order_id}\nTotal: ${rp(d.amount)}\nPelanggan: ${d.name} (${d.phone})`).catch(() => {});
-        }
-        return `✅ Pembayaran *${d.order_id}* diterima! Pesananmu sedang diproses ya kak. Terima kasih 🙏`;
-      }
-      if (!res.ok) return `Belum bisa cek pembayaran: ${res.error}. Coba lagi sebentar ya kak.`;
-      return 'Pembayarannya belum terdeteksi kak. Pastikan sudah scan QR & bayar, lalu ketik *SUDAH BAYAR* lagi.';
-    }
-    // Bug #5: customer mau mulai pesanan baru padahal masih menunggu bayar.
-    // Pesanan lama TIDAK dibatalkan diam-diam — hanya bila customer memilih PESAN BARU.
-    if (/^(pesan baru|buat baru|mulai baru|order baru)$/i.test(q)) {
-      await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'batal' }).catch(() => {});
-      await clearSession(userId);
-      return 'Baik kak, pesanan lama sudah dibatalkan. Mau pesan produk apa? 😊';
-    }
-    if (/^lanjut bayar$/i.test(q)) {
-      return 'Silakan scan QRIS di atas untuk membayar ya kak. Setelah bayar, ketik *SUDAH BAYAR*.';
-    }
-    if (/pesan (lagi|baru)|order (lagi|baru)|mau (beli|pesan)|tambah pesanan|buat pesanan/i.test(q)) {
-      return `Pesanan *${d.order_id}* masih menunggu pembayaran kak.\n\nKetik *LANJUT BAYAR* untuk selesaikan pembayaran ini, atau *PESAN BARU* untuk batalkan pesanan ini & mulai dari awal.`;
-    }
-    return 'Silakan scan QRIS di atas untuk membayar ya kak. Setelah bayar, ketik *SUDAH BAYAR*.';
-  }
-
-  // Step: konfirmasi
-  if (session.step === 'confirm') {
-    if (isYes(q)) {
-      // Bug #1: klaim atomik — dua "YA" cepat hanya satu yang lolos.
-      const claimed = await claimConfirmSession(userId);
-      if (!claimed) return 'Pesananmu sedang diproses ya kak, tunggu sebentar 😊';
-      try {
-        const r = await createOrder(d);
-        if (OWNER_ID) {
-          await sendMessage(OWNER_ID,
-            `🛒 *PESANAN BARU* (via Agent)\nInvoice: ${r.orderId}\n${d.product_nama} × ${d.qty} = ${rp(r.total)}\nPelanggan: ${d.name} (${d.phone})\nStatus: Belum Bayar 🔴`).catch(() => {});
-        }
-        if (r.qrUrl) {
-          const newDraft = { ...d, order_id: r.orderId, trx_id: r.trxId, amount: r.total };
-          await saveSession(userId, 'awaiting_payment', newDraft);
-          const caption = `🧾 *Pesanan ${r.orderId}*\n${d.product_nama} × ${d.qty}\n*Total: ${rp(r.total)}*\n\nSilakan scan QRIS di atas untuk membayar. Setelah bayar, ketik *SUDAH BAYAR*.`;
-          if (onPhoto) {
-            await onPhoto(r.qrUrl, caption);
-            return null; // pemanggil (WA) yang mengirim fotonya
-          }
-          await sendPhoto(userId, r.qrUrl, caption);
-          return null; // foto sudah terkirim sebagai balasan
-        }
-        // QRIS gagal → JANGAN masuk awaiting_payment, beri opsi coba lagi
-        await saveSession(userId, 'qris_failed', { ...d, order_id: r.orderId, amount: r.total });
-        return `Pesanan *${r.orderId}* sudah tercatat, tapi QRIS gagal dibuat (${r.qrisError || 'unknown'}).\nKetik *COBA LAGI* untuk coba lagi, atau admin akan menghubungimu ya kak.`;
-      } catch (e) {
-        // Kembalikan sesi ke confirm agar customer bisa coba lagi (bug #1).
-        await saveSession(userId, 'confirm', d);
-        console.error('[customer] createOrder gagal:', e.message);
-        return 'Maaf kak, pesanan gagal dibuat. Coba lagi atau hubungi admin ya.';
-      }
-    }
-    if (/^(tidak|nggak|ga|batal)$/i.test(q)) {
-      await saveSession(userId, 'collecting', {});
-      return 'Baik, diulang dari awal ya kak. Mau pesan produk apa?';
-    }
-    return 'Ketik *YA* untuk lanjut buat pesanan, atau *BATAL* untuk membatalkan.';
-  }
-
-  // Step: idle / collecting / done → parse dengan LLM
-  let products = [];
-  try { products = await getProducts(); } catch (e) {
-    return 'Maaf kak, katalog sedang tidak bisa diakses. Coba lagi sebentar ya.';
-  }
-  if (!products.length) return 'Maaf kak, katalog produk sedang kosong.';
-
-  // Sapaan pertama pelanggan baru: natural, JANGAN langsung sodorkan katalog
-  if (session.step === 'idle' && !d.product_id && /^(halo+|hai+|hello+|hi+|pagi+|siang+|sore+|malam+|tes|test|assalamu\s*alaikum)(\s+k[ak]+)?[!?.\s]*$/i.test(q)) {
-    const greets = [
-      'Halo kak! Selamat datang di Digiprint 😊\nMau pesan nota atau kwitansi custom? Atau mau tanya-tanya dulu juga boleh.',
-      'Halo juga kak! Ada yang bisa saya bantu? 😊\nKami bisa bantu pesankan nota NCR & kwitansi custom.',
-      'Hai kak, selamat datang! 😊\nMau order apa hari ini?',
-    ];
-    return greets[Math.floor(Math.random() * greets.length)];
-  }
-
-  const p = await parseMessage(q, products, session);
-
-  // Simpan riwayat untuk konteks turn berikutnya (user msg sudah di prompt, tambah bot reply nanti)
-  d.history = Array.isArray(d.history) ? d.history : [];
-  d.history.push({ role: 'user', text: q.slice(0, 200) });
-  if (d.history.length > 40) d.history = d.history.slice(-40);
-  // Helper: simpan bot reply ke history + persist session
-  const saveHist = async (step, botReply) => {
-    if (botReply) {
-      d.history.push({ role: 'bot', text: String(botReply).slice(0, 200) });
-      if (d.history.length > 40) d.history = d.history.slice(-40);
-    }
-    await saveSession(userId, step, d);
+// Antrekan WA: panel yang kirim via Baileys
+async function queueWA(toWa, kind, content, caption, imageUrl) {
+  const row = {
+    to_wa: formatWA(toWa), kind, content, caption: caption || null, status: 'pending',
   };
+  if (imageUrl) row.image_url = imageUrl;
+  await sbPost('wa_outbox', [row], 'return=minimal').catch((e) => console.error('[admin] queueWA gagal:', e.message));
+}
+async function logActivity(aksi, detail) {
+  sbPost('agent_activity', [{ kategori: 'toko', aksi, detail: String(detail || '').slice(0, 500) }], 'return=minimal').catch(() => {});
+}
 
-  // Terapkan slot ke draft
-  if (p.product_id) {
-    const prod = products.find((x) => x.id === p.product_id);
-    if (prod) { d.product_id = prod.id; d.product_nama = prod.nama; d.harga = Number(prod.harga); d.product_hint = null; }
-  }
-  if (p.product_hint && !d.product_id) d.product_hint = String(p.product_hint).slice(0, 60);
-  // Bug #4: qty bisa datang sebagai teks ("100 lembar") — ambil digitnya.
-  if (p.qty !== null && p.qty !== undefined && String(p.qty).trim() !== '') {
-    const m = String(p.qty).match(/\d+/);
-    const n = m ? parseInt(m[0], 10) : 0;
-    if (n > 0) d.qty = n;
-  }
-  if (p.name) d.name = String(p.name).slice(0, 80);
-  if (p.phone) d.phone = normPhone(p.phone); // Bug #6: 08xx → 628xx
-  if (p.address) d.address = String(p.address).slice(0, 200);
+const MD = { parse_mode: 'Markdown' };
+const kb = (rows) => ({ reply_markup: { inline_keyboard: rows } });
+const BACK_HOME = [[{ text: '🔙 Kembali', callback_data: 'home' }]];
+const BACK_MAIN = [[{ text: '🔙 Menu Utama', callback_data: 'home' }]];
 
-  if (p.intent === 'cancel') {
-    await clearSession(userId);
-    return 'Baik kak, dibatalkan. Chat lagi aja kalau butuh 😊';
-  }
-  if (p.intent === 'paid') {
-    return 'Kakak belum punya pesanan aktif. Mau buat pesanan dulu?';
+// ---------- MENU UTAMA ----------
+async function showHome(chatId, messageId = null) {
+  await clearAdminState(chatId);
+  const text = `🏠 *MENU UTAMA SISTEM TOKO*`;
+  const options = { ...MD, ...kb([
+    [{ text: '🛍 Order WA', callback_data: 'home_order' }, { text: '🛒 Order Market', callback_data: 'home_market' }],
+    [{ text: '🔍 Cek Pesanan', callback_data: 'home_cek' }, { text: '📦 Update Paket', callback_data: 'home_paket' }],
+    [{ text: '📦 Kelola Produk', callback_data: 'home_produk' }, { text: '📂 Edukasi & Promo', callback_data: 'home_edukasi' }],
+    [{ text: '📊 Laporan', callback_data: 'home_laporan' }, { text: '⚙️ Setting Toko', callback_data: 'home_setting' }],
+    [{ text: '💸 Tarik Dana', url: 'https://payinaja.com/dashboard/withdraw' }],
+  ]) };
+  if (messageId) await tg.editMessageText(chatId, messageId, text, options);
+  else await tg.sendMessage(chatId, text, options);
+}
+
+async function renderMassalMenu(chatId, msgId, state) {
+  const keyboard = [];
+  state.list.forEach((r) => {
+    const isChecked = state.selected.includes(r[0]);
+    keyboard.push([{ text: `${isChecked ? '✅' : '⬜️'} ${r[0]} (${r[2]})`, callback_data: `mtog_${r[0]}` }]);
+  });
+  keyboard.push([{ text: `🚀 Lanjut Upload Gambar (${state.selected.length} Dipilih)`, callback_data: 'massal_lanjut' }]);
+  keyboard.push([{ text: '🔙 Kembali', callback_data: 'home_paket' }]);
+  await tg.editMessageText(chatId, msgId,
+    '📚 *PILIH PESANAN (MASSAL):*\nKlik untuk menceklis pesanan yang resinya siap diupload:',
+    { ...MD, ...kb(keyboard) });
+}
+
+function renderOrderQtyMenu(chatId, messageId, count) {
+  return tg.editMessageText(chatId, messageId, `🛍 *Total Produk: ${count}*`, {
+    ...MD, ...kb([
+      [{ text: '➖', callback_data: `oqty_dec_${count}` }, { text: '📝 Generate Form', callback_data: `oqty_gen_${count}` }, { text: '➕', callback_data: `oqty_inc_${count}` }],
+      [{ text: '🔙 Kembali', callback_data: 'home' }],
+    ]),
+  });
+}
+
+// Kirim resi ke customer + update DB (dipakai beberapa alur)
+async function kirimResiKeCustomer(chatId, idPesanan, fileLink, viaOCR) {
+  const res = await getAllData();
+  const order = res.data.slice(1).find((r) => String(r[0] || '').toUpperCase() === String(idPesanan).toUpperCase());
+  if (!order) return null;
+  await updateResi(idPesanan, fileLink);
+  await updateStatus(idPesanan, 'Dikirim 🚚');
+  const hari = getEstimasi(order[4]);
+  await queueWA(order[3], 'image', fileLink,
+    `🚚 *PAKET DIKIRIM (${idPesanan})*\nHalo kak! Paket sudah diserahkan ke kurir. (Otomatis selesai dlm ${hari} Hari).`);
+  await logActivity('resi', `Resi dikirim ${idPesanan} (${viaOCR ? 'OCR otomatis' : 'manual'}). Estimasi ${hari} hari.`);
+  return hari;
+}
+
+// ---------- CALLBACK QUERY ----------
+async function handleCallback(chatId, msgId, data, queryId) {
+  await tg.answerCallbackQuery(queryId).catch(() => {});
+  const edit = (text, extra = {}) => tg.editMessageText(chatId, msgId, text, { ...MD, ...extra });
+
+  if (data === 'home') return showHome(chatId, msgId);
+
+  if (data === 'home_setting') {
+    const profile = await getProfile();
+    const txt = `⚙️ *PENGATURAN PROFIL TOKO*\n\n🏢 *Nama:* ${profile.nama}\n📍 *Alamat:* ${profile.alamat}\n📞 *Kontak:* ${profile.kontak}\n📸 *Logo:* ${profile.logo ? '✅ Sudah Ada' : '❌ Belum Ada'}\n\nSilakan pilih menu di bawah ini:`;
+    return edit(txt, kb([[{ text: '✏️ Edit Profil Toko', callback_data: 'setting_edit' }], BACK_HOME[0]]));
   }
 
-  // Tentukan kelengkapan
-  const missing = [];
-  if (!d.product_id) missing.push('produk');
-  if (!d.qty) missing.push('jumlah');
-  if (!d.name) missing.push('nama');
-  if (!d.phone) missing.push('no WA');
-  if (!d.address) missing.push('alamat');
-
-  if (!missing.length) {
-    await saveSession(userId, 'confirm', d);
-    return `${orderSummary(d)}\n\nKetik *YA* untuk buat pesanan & tampilkan QRIS, atau *BATAL* untuk membatalkan.`;
+  if (data === 'setting_edit') {
+    await edit('⏳ _Menyiapkan form profil..._');
+    await tg.deleteMessage(chatId, msgId);
+    const profile = await getProfile();
+    await setAdminState(chatId, 'edit_profil_nama', { temp: profile });
+    return tg.sendMessage(chatId, `🏢 *EDIT PROFIL USAHA*\n\n📝 Kirimkan *Nama Usaha* Anda yang baru.\nSaat ini: ${profile.nama}\n_(💡 Ketik "-" jika tidak ingin mengubah ini)_`, MD);
   }
 
-  await saveSession(userId, 'collecting', d);
-  // Pakai balasan LLM bila sudah menanyakan hal yang kurang; kalau tidak, fallback template
-  const needWords = {
-    produk: ['produk', 'paket', 'nota', 'kwitansi', 'barang'],
-    jumlah: ['jumlah', 'lembar', 'berapa', 'banyak'],
-    nama: ['nama'],
-    'no WA': ['wa', 'nomor', 'telepon', 'hp'],
-    alamat: ['alamat', 'kirim', 'lokasi']
-  };
-  const replyLower = (p.reply || '').toLowerCase();
-  const asksMissing = missing.some((m) => (needWords[m] || [m]).some((w) => replyLower.includes(w)));
-  if (p.reply && (asksMissing || p.intent === 'ask' || p.intent === 'greeting' || p.intent === 'other')) {
-    // Katalog HANYA bila diminta eksplisit, atau saat mau pesan tapi produknya belum jelas.
-    // Selain itu (mis. tanya ukuran, tanya harga satuan) → jawab saja, tanpa katalog.
-    const wantsCatalog = /katalog|daftar harga|price list|jualan apa|jual apa|produk apa|semua produk/i.test(q);
-    // Katalog HANYA bila diminta eksplisit — jangan spam tiap pesan order.
-    if (wantsCatalog) {
-      return `${p.reply}\n\nDaftar harga kami kak:\n${catalogCompact(products)}`;
+  if (data === 'home_produk') {
+    return edit('📦 *KELOLA KATALOG PRODUK*\nSilakan pilih menu di bawah ini:',
+      kb([[{ text: '➕ Tambah Produk Baru', callback_data: 'produk_tambah' }], [{ text: '✏️ Edit Produk', callback_data: 'produk_edit' }], BACK_HOME[0]]));
+  }
+
+  if (data === 'produk_tambah') {
+    await edit('⏳ _Memeriksa ID Produk terakhir..._');
+    let lastId = 'Belum ada produk';
+    try {
+      const res = await getSemuaProduk();
+      if (res.success && res.data.length > 1) lastId = res.data[res.data.length - 1][0];
+    } catch {}
+    await tg.deleteMessage(chatId, msgId);
+    await setAdminState(chatId, 'add_id', { temp: {} });
+    return tg.sendMessage(chatId, `➕ *TAMBAH PRODUK BARU*\n\nSilakan ketik dan kirimkan *ID Produk* Anda.\n_(💡 Info: ID Terakhir di sheet adalah *${lastId}*)_\n\nKetik /batal jika ingin membatalkan.`, MD);
+  }
+
+  if (data === 'produk_edit') {
+    await edit('⏳ _Membuka mode Edit Produk..._');
+    await tg.deleteMessage(chatId, msgId);
+    await setAdminState(chatId, 'edit_find', { temp: {} });
+    return tg.sendMessage(chatId, '✏️ *EDIT PRODUK*\n\nSilakan ketik dan kirimkan *ID Produk* yang ingin diedit:\n\nKetik /batal jika ingin membatalkan.', MD);
+  }
+
+  if (data === 'home_order') return renderOrderQtyMenu(chatId, msgId, 1);
+  if (data === 'home_market') return tg.sendMessage(chatId, `💡 *TIPS: PINTASAN MARKETPLACE*\nKetik pesan ke bot ini dengan format:\n!\n[Nomor Resi]\n[Nomor WA]`, MD);
+
+  if (data === 'home_cek') return edit('📋 *MENU CEK PESANAN*',
+    kb([[{ text: '📊 Cek Status Massal', callback_data: 'cek_massal' }], [{ text: '🔍 Cari Detail', callback_data: 'cek_detail' }], BACK_HOME[0]]));
+  if (data === 'cek_massal') return edit('🚦 *PILIH STATUS:*',
+    kb([[{ text: '🔴 Belum Bayar', callback_data: 'list_Belum' }], [{ text: '⚙️ Sedang Diproses', callback_data: 'list_Diproses' }], [{ text: '🚚 Sedang Dikirim', callback_data: 'list_Dikirim' }], [{ text: '🔙 Kembali', callback_data: 'home_cek' }]]));
+  if (data.startsWith('list_')) {
+    const statusReq = data.split('_')[1];
+    await edit('⏳ Mencari data...');
+    try {
+      const res = await getAllData();
+      const list = res.data.slice(1).filter((r) => String(r[7] || '').includes(statusReq));
+      let txt = `📋 *DAFTAR (${statusReq.toUpperCase()})*\n\n`;
+      if (list.length === 0) txt += '_Tidak ada pesanan._';
+      else list.slice(0, 15).forEach((r) => { txt += `• *${r[0]}* - ${r[2]}\n`; });
+      return edit(txt, kb([[{ text: '🔙 Kembali', callback_data: 'cek_massal' }]]));
+    } catch { return edit('❌ Gagal.'); }
+  }
+  if (data === 'cek_detail') {
+    await setAdminState(chatId, 'input_cek', {});
+    return edit('🔍 *PENCARIAN PINTAR*\nKetik *ID, No WA, atau sebagian Nama*.',
+      kb([[{ text: '🔙 Batal', callback_data: 'home' }]]));
+  }
+
+  if (data === 'home_paket') {
+    return edit('📦 *UPDATE PAKET*', kb([
+      [{ text: '📦 Kirim Paket (Satu-satu)', callback_data: 'paket_kirim' }],
+      [{ text: '📚 Kirim Paket Massal (Ceklis)', callback_data: 'paket_massal' }],
+      [{ text: '⚙️ Ubah Status', callback_data: 'paket_status' }, { text: '🧾 Kirim Manual', callback_data: 'paket_resi' }],
+      BACK_HOME[0],
+    ]));
+  }
+
+  if (data === 'paket_kirim') {
+    await edit('⏳ _Mencari pesanan yang diproses..._');
+    try {
+      const res = await getAllData();
+      const list = res.data.slice(1).filter((r) => String(r[7] || '').includes('Diproses'));
+      if (list.length === 0) {
+        return edit('❌ *Kosong*\nTidak ada pesanan dengan status *Diproses* saat ini.',
+          kb([[{ text: '🔙 Kembali', callback_data: 'home_paket' }]]));
+      }
+      const keyboard = [];
+      list.slice(0, 15).forEach((r) => keyboard.push([{ text: `📦 ${r[0]} (${r[2]})`, callback_data: `sr_${r[0]}` }]));
+      keyboard.push([{ text: '🔙 Kembali', callback_data: 'home_paket' }]);
+      return edit('📦 *PILIH PESANAN UNTUK DIKIRIM:*\n_(Maksimal menampilkan 15 antrean)_', kb(keyboard));
+    } catch (e) { return edit(`❌ *Terjadi Error:* ${e.message}`); }
+  }
+
+  if (data === 'paket_massal') {
+    await edit('⏳ _Mencari data pesanan..._');
+    try {
+      const res = await getAllData();
+      const list = res.data.slice(1).filter((r) => String(r[7] || '').includes('Diproses'));
+      if (list.length === 0) {
+        return edit('❌ *Kosong*\nTidak ada pesanan untuk dikirim.',
+          kb([[{ text: '🔙 Kembali', callback_data: 'home_paket' }]]));
+      }
+      const st = { step: 'massal_select', list: list.slice(0, 15), selected: [] };
+      await setAdminState(chatId, 'massal_select', st);
+      return renderMassalMenu(chatId, msgId, st);
+    } catch (e) { return edit(`❌ Error: ${e.message}`); }
+  }
+
+  if (data.startsWith('mtog_')) {
+    const idPesanan = data.split('_')[1];
+    const st = await getAdminState(chatId);
+    if (!st || st.step !== 'massal_select') return tg.answerCallbackQuery(queryId, { text: 'Sesi habis, ulangi dari menu.' });
+    const d = st.data || { selected: [], list: [] };
+    if (d.selected.includes(idPesanan)) d.selected = d.selected.filter((id) => id !== idPesanan);
+    else d.selected.push(idPesanan);
+    await setAdminState(chatId, 'massal_select', d);
+    return renderMassalMenu(chatId, msgId, d);
+  }
+
+  if (data === 'massal_lanjut') {
+    const st = await getAdminState(chatId);
+    const d = (st && st.data) || { selected: [] };
+    if (!d.selected || d.selected.length === 0) return tg.answerCallbackQuery(queryId, { text: '❌ Pilih minimal 1 resi!', show_alert: true });
+    await setAdminState(chatId, 'massal_upload', d);
+    return edit(`📸 *UPLOAD RESI MASSAL*\n\nAnda telah memilih *${d.selected.length} pesanan*. \nSilakan upload (kirim) foto-foto resi sekaligus sebagai album di obrolan ini.\n\nAI akan mencocokkannya satu per satu.\n\nKetik /batal jika ingin berhenti.`);
+  }
+
+  if (data.startsWith('sr_')) {
+    const idPesanan = data.split('_')[1];
+    await setAdminState(chatId, 'upload_resi_btn', { temp: { id: idPesanan } });
+    return edit(`📸 *KIRIM RESI KEPADA PELANGGAN*\n\nPesanan Terpilih: *${idPesanan}*\n\nSilakan *Upload Foto Resi* ke obrolan ini sekarang.\n_(Anda tidak perlu mengetik caption apa-apa lagi)_`,
+      kb([[{ text: '🔙 Batal', callback_data: 'paket_kirim' }]]));
+  }
+
+  if (data === 'paket_status') {
+    await setAdminState(chatId, 'input_paket_status', {});
+    return edit('⚙️ *UBAH STATUS*\nKetik *ID Pesanan*.', kb([[{ text: '🔙 Batal', callback_data: 'home' }]]));
+  }
+  if (data === 'paket_resi') {
+    await setAdminState(chatId, 'input_paket_resi', {});
+    return edit('🧾 *KIRIM BUKTI PENGIRIMAN (Ketik ID)*\nSilakan *Upload Foto Resi* dan ketik *ID Pesanan* di bagian Caption foto.',
+      kb([[{ text: '🔙 Batal', callback_data: 'home' }]]));
+  }
+
+  if (data === 'home_laporan') return edit('📊 *LAPORAN PENJUALAN*\n(Bisa di-Export ke CSV/Excel)',
+    kb([[{ text: '📅 7 Hari Terakhir', callback_data: 'lap_7' }, { text: '📅 30 Hari Terakhir', callback_data: 'lap_30' }], BACK_HOME[0]]));
+  if (data === 'lap_7' || data === 'lap_30') return buatLaporan(chatId, parseInt(data.split('_')[1], 10));
+
+  if (data === 'home_edukasi') return edit('📂 *KIRIM EDUKASI/FORM*', kb([
+    [{ text: '📝 Form Kwitansi', callback_data: 'edu_kwi' }, { text: '📝 Form Nota', callback_data: 'edu_not' }],
+    [{ text: '📦 Kirim Produk Katalog', callback_data: 'edu_prod' }],
+    BACK_HOME[0],
+  ]));
+
+  if (data === 'edu_kwi' || data === 'edu_not' || data === 'edu_prod') {
+    await setAdminState(chatId, `input_wa_edu_${data.split('_')[1]}`, {});
+    return edit('📱 Ketik *Nomor WA* pelanggan tujuan:');
+  }
+
+  if (data.startsWith('setstatus_')) {
+    const parts = data.split('_');
+    const idPesanan = parts[1]; const statusBaru = parts[2]; const wa = parts[3];
+    await updateStatus(idPesanan, statusBaru);
+    let txt = `📦 *UPDATE PESANAN (${idPesanan})*\nHalo kak! Pesanan kakak saat ini `;
+    if (statusBaru === 'Dikirim') txt += 'sedang *DIKIRIM* 🚚';
+    else if (statusBaru === 'Diproses') txt += 'sedang *DIPROSES* ⚙️';
+    else txt += 'sudah *SELESAI* 🥰';
+    await queueWA(wa, 'text', txt);
+    await logActivity('status', `Status ${idPesanan} → ${statusBaru} oleh admin.`);
+    return edit(`✅ Status diubah menjadi ${statusBaru}`);
+  }
+
+  if (data.startsWith('oqty_')) {
+    const parts = data.split('_'); const action = parts[1]; let count = parseInt(parts[2], 10);
+    if (action === 'dec' && count > 1) count--;
+    if (action === 'inc') count++;
+    if (action === 'gen') {
+      let txt = `📋 *TEMPLATE ORDER*\nNama Penerima: \nNomor wa Penerima: \nAlamat lengkap: \n`;
+      for (let i = 0; i < count; i++) txt += `Detail Pesanan ${i + 1}\nNama Produk: \nqty: \nHarga satuan: \n`;
+      return tg.sendMessage(chatId, txt, MD);
     }
-    return p.reply;
+    return renderOrderQtyMenu(chatId, msgId, count);
   }
-  const labels = { produk: 'mau pesan produk apa', jumlah: 'berapa jumlahnya', nama: 'siapa nama kakak', 'no WA': 'nomor WA kakak berapa', alamat: 'alamat lengkapnya di mana' };
-  return `${p.reply ? p.reply + '\n\n' : ''}Boleh info ${labels[missing[0]]}? 😊`;
 }
 
-// ---------- Bukti transfer dari customer (foto) → OCR ----------
-// Dipakai saat customer kirim foto di Telegram. Untuk WA, foto bukti
-// ditangani terpisah (panel teruskan file ke endpoint ini bila diperlukan).
-async function handleCustomerPhoto(userId, fileId) {
-  const { getFileUrl, sendPhoto } = require('./telegram-api');
-  const { ocrImage, extractAmounts } = require('./ocr');
-  const session = await getSession(userId);
-  const d = (session && session.draft) || {};
-  if (!session || session.step !== 'awaiting_payment' || !d.order_id) {
-    return 'Untuk pesan barang, kirim dalam bentuk teks ya kak 😊';
-  }
-  const fileUrl = await getFileUrl(fileId).catch(() => null);
-  const ocr = fileUrl ? await ocrImage(fileUrl) : { ok: false };
-  if (!ocr.ok) return 'Maaf kak, fotonya tidak terbaca. Coba kirim ulang dengan gambar yang lebih jelas ya.';
-  const amounts = extractAmounts(ocr.text);
-  const read = amounts[0] || 0;
-  const total = Math.round(Number(d.amount) || 0);
-  const cocok = read && Math.abs(read - total) <= 1000;
-  // Teruskan foto + hasil OCR ke owner untuk verifikasi
-  if (OWNER_ID) {
-    const cap = `🧾 *BUKTI TRANSFER*\nPesanan: ${d.order_id}\nPelanggan: ${d.name} (${d.phone})\nTotal tagihan: ${rp(total)}\nTerbaca OCR: ${read ? rp(read) : 'tidak terbaca'} ${cocok ? '✅ COCOK' : '⚠️ BEDA'}\n\nTeks OCR:\n${ocr.text.slice(0, 500)}`;
-    await sendPhoto(OWNER_ID, fileId, cap).catch(() => {});
-  }
-  await logActivitySafe('bukti', `Bukti transfer ${d.order_id}: terbaca ${rp(read)} ${cocok ? '(cocok)' : '(beda)'}`);
-  if (cocok) {
-    return `Bukti transfer diterima kak (terbaca ${rp(read)} ✅). Admin akan verifikasi sebentar ya 🙏`;
-  }
-  return `Bukti diterima kak, tapi nominal yang terbaca (${read ? rp(read) : 'tidak jelas'}) berbeda dengan total ${rp(total)}. Admin akan cek manual ya kak 🙏`;
-}
-
-async function logActivitySafe(aksi, detail) {
+async function buatLaporan(chatId, rentangHari) {
+  await tg.sendMessage(chatId, '⏳ Merekap data...', MD);
   try {
-    const SB_URL2 = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
-    const SB_KEY2 = process.env.SUPABASE_SERVICE_KEY || '';
-    await fetch(`${SB_URL2}/rest/v1/agent_activity`, {
-      method: 'POST',
-      headers: { apikey: SB_KEY2, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-      body: JSON.stringify([{ kategori: 'toko', aksi, detail: String(detail).slice(0, 500) }]),
+    const res = await getAllData();
+    const rows = res.data.slice(1);
+    let csv = 'ID Pesanan,Tanggal,Nama,No WA,Total Tagihan,Status\n';
+    rows.forEach((row) => {
+      if (!String(row[7] || '').includes('Belum')) {
+        csv += `${row[0]},${row[1]},"${String(row[2] || '').replace(/"/g, '')}",${row[3]},${row[6]},${String(row[7] || '').replace(/,/g, '')}\n`;
+      }
     });
-  } catch {}
+    await tg.sendDocument(chatId, Buffer.from(csv, 'utf8'), `Laporan_${rentangHari}hari_${Date.now()}.csv`, `📊 Laporan ${rentangHari} hari terakhir`);
+    await logActivity('laporan', `Laporan ${rentangHari} hari dikirim ke admin.`);
+  } catch (e) {
+    await tg.sendMessage(chatId, `❌ Gagal membuat laporan: ${e.message}`);
+  }
 }
 
-module.exports = { handleCustomer, handleCustomerPhoto, getSession, clearSession };
+// ---------- PESAN ADMIN (state flows) ----------
+async function handleMessage(chatId, msg) {
+  const text = msg.caption || msg.text || '';
+  const hasPhoto = !!(msg.photo && msg.photo.length);
+
+  // /batal kapan saja saat ada state
+  if (text === '/batal') {
+    const st = await getAdminState(chatId);
+    if (st) {
+      await clearAdminState(chatId);
+      return tg.sendMessage(chatId, '🚫 *Proses Dibatalkan.* Silakan kembali menggunakan /menu.', MD);
+    }
+    return null; // bukan dalam alur admin → biarkan asisten yang tangani
+  }
+
+  const st = await getAdminState(chatId);
+  if (!st) {
+    // ===== FITUR JUALAN: /invoice =====
+    const invMatch = text.match(/^\/invoice\s+(INV-\d{6})/i);
+    if (invMatch) return handleInvoice(chatId, invMatch[1].toUpperCase());
+
+    // ===== FITUR JUALAN: /broadcast =====
+    if (text.startsWith('/broadcast ')) {
+      const pesan = text.substring(11).trim();
+      if (!pesan) return tg.sendMessage(chatId, '❌ Format: `/broadcast <pesan>`', MD);
+      return handleBroadcastConfirm(chatId, pesan);
+    }
+    // Konfirmasi broadcast: YA / BATAL
+    // (state broadcast_confirm ditangani di bawah)
+
+    // ===== FITUR JUALAN: foto + caption /kirim =====
+    if (hasPhoto && /^\/kirim\s+/i.test(text)) return handleKirimGambar(chatId, msg, text);
+
+    // Foto tanpa state → OCR resi otomatis (seperti bot lama)
+    if (hasPhoto) return handleFotoOtomatis(chatId, msg, text);
+    // Perintah cepat marketplace: !\n[resi]\n[wa]
+    if (text.startsWith('!')) return handleMarketplace(chatId, text);
+    // Template order terisi
+    if (text.includes('TEMPLATE ORDER') || text.includes('FORM PEMESANAN')) return handleTemplateOrder(chatId, text);
+
+    // ===== FITUR JUALAN: kirim PDF/invoice ke customer (bahasa natural) =====
+    // Cth: "bisakah kamu kirimkan ke customer format pdf?", "kirim invoice ke wa customer", "generate pdf"
+    if (/kirim.*(pdf|invoice)|(pdf|invoice).*(kirim|customer|pelanggan)|generate.*(pdf|invoice)|(pdf|invoice).*generate/i.test(text)) {
+      // Cari INV-xxx di pesan ini atau state terakhir
+      let orderId = (text.match(/INV-\d{6}/i) || [])[0];
+      if (!orderId) {
+        const st2 = await getAdminState(chatId).catch(() => null);
+        orderId = st2?.data?.lastOrderId || null;
+      }
+      if (!orderId) {
+        return tg.sendMessage(chatId,
+          '📄 *Kirim PDF ke customer*\n\nNomor pesanannya yang mana? (cth: `INV-123456`)', MD);
+      }
+      return handleInvoiceToWA(chatId, orderId.toUpperCase());
+    }
+
+    return null; // teks bebas → asisten AI
+  }
+
+  const step = st.step;
+  const d = st.data || {};
+  const input = text.trim();
+
+  // --- FITUR JUALAN: Konfirmasi broadcast ---
+  if (step === 'broadcast_confirm') {
+    if (/^(ya|iya|oke|ok|lanjut|kirim)$/i.test(input)) {
+      return handleBroadcastExec(chatId, d.pesan || '');
+    }
+    await clearAdminState(chatId);
+    return tg.sendMessage(chatId, '🚫 *Broadcast dibatalkan.*', MD);
+  }
+
+  // --- Upload resi massal (OCR) ---
+  if (step === 'massal_upload') {
+    if (!hasPhoto) return tg.sendMessage(chatId, '❌ Harap kirimkan foto resi.');
+    const fileId = msg.photo[msg.photo.length - 1].file_id;
+    await tg.sendMessage(chatId, '⏳ _Menganalisis gambar dengan AI..._', { ...MD, reply_to_message_id: msg.message_id });
+    const fileUrl = await tg.getFileUrl(fileId).catch(() => null);
+    const ocr = fileUrl ? await ocrImage(fileUrl) : { ok: false };
+    if (!ocr.ok) return tg.sendMessage(chatId, '❌ *GAGAL:* Gambar tidak terbaca oleh AI.', MD);
+    const ocrText = ocr.text.toUpperCase();
+    const matchId = (d.selected || []).find((id) => ocrText.includes(String(id).toUpperCase()));
+    if (!matchId) return tg.sendMessage(chatId, '❌ *TIDAK COCOK:* AI salah baca atau nomor tidak ada di ceklistan.', MD);
+    const hari = await kirimResiKeCustomer(chatId, matchId, fileUrl, true);
+    d.selected = (d.selected || []).filter((id) => id !== matchId);
+    if (d.selected.length === 0) {
+      await clearAdminState(chatId);
+      return tg.sendMessage(chatId, '🎉 *SEMUA RESI MASSAL TELAH TERKIRIM!*', { ...MD, ...kb([[ { text: '🔙 Kembali ke Menu Utama', callback_data: 'home' } ]]) });
+    }
+    await setAdminState(chatId, 'massal_upload', d);
+    return tg.sendMessage(chatId, `✅ *BERHASIL: Resi ${matchId} terkirim!* Timer: ${hari} Hari. Sisa: ${d.selected.length}`, MD);
+  }
+
+  // --- Upload resi satu-satu (tombol) ---
+  if (step === 'upload_resi_btn') {
+    if (!hasPhoto) return tg.sendMessage(chatId, '❌ Harap *Upload Foto* resi, bukan teks.', MD);
+    const idPesanan = d.temp && d.temp.id;
+    const wait = await tg.sendMessage(chatId, `⏳ _Mengirim resi untuk ${idPesanan}..._`, MD);
+    try {
+      const fileId = msg.photo[msg.photo.length - 1].file_id;
+      const fileLink = await tg.getFileUrl(fileId);
+      const hari = await kirimResiKeCustomer(chatId, idPesanan, fileLink, false);
+      if (hari === null) {
+        await tg.editMessageText(chatId, wait.message_id, `❌ ID Pesanan *${idPesanan}* tidak ditemukan di database.`, MD);
+      } else {
+        await tg.editMessageText(chatId, wait.message_id,
+          `✅ *SUKSES*\nResi terkirim untuk *${idPesanan}*. Timer: ${hari} Hari`,
+          { ...MD, ...kb(BACK_MAIN) });
+      }
+    } catch (e) { await tg.editMessageText(chatId, wait.message_id, `❌ *Gagal:* ${e.message}`, MD); }
+    await clearAdminState(chatId);
+    return;
+  }
+
+  // --- Kirim resi manual (foto + caption ID) ---
+  if (step === 'input_paket_resi') {
+    if (!hasPhoto) return tg.sendMessage(chatId, '❌ Harap *Upload Foto* dan ketik ID di Caption, bukan hanya mengirim teks.', MD);
+    if (!text) return tg.sendMessage(chatId, "❌ Anda lupa mengetik ID Pesanan di Caption Foto. Silakan klik menu kembali dan ulangi.");
+    const idPesanan = text.toUpperCase();
+    const wait = await tg.sendMessage(chatId, '⏳ _Mengirim resi manual..._', MD);
+    try {
+      const fileId = msg.photo[msg.photo.length - 1].file_id;
+      const fileLink = await tg.getFileUrl(fileId);
+      const hari = await kirimResiKeCustomer(chatId, idPesanan, fileLink, false);
+      if (hari === null) await tg.editMessageText(chatId, wait.message_id, `❌ ID Pesanan *${idPesanan}* tidak ditemukan di database.`, MD);
+      else await tg.editMessageText(chatId, wait.message_id, `✅ *SUKSES*\nResi manual terkirim. Timer: ${hari} Hari`, MD);
+    } catch (e) { await tg.editMessageText(chatId, wait.message_id, `❌ *Gagal:* ${e.message}`, MD); }
+    await clearAdminState(chatId);
+    return;
+  }
+
+  // --- Edit profil toko ---
+  if (step === 'edit_profil_nama') {
+    if (input !== '-') d.temp.nama = input;
+    await setAdminState(chatId, 'edit_profil_alamat', d);
+    return tg.sendMessage(chatId, `📍 Kirimkan *Alamat Usaha*.\nSaat ini: ${d.temp.alamat}\n_(Ketik "-" untuk skip)_`, MD);
+  }
+  if (step === 'edit_profil_alamat') {
+    if (input !== '-') d.temp.alamat = input;
+    await setAdminState(chatId, 'edit_profil_kontak', d);
+    return tg.sendMessage(chatId, `📞 Kirimkan *Nomor Kontak (WA/Telp)*.\nSaat ini: ${d.temp.kontak}\n_(Ketik "-" untuk skip)_`, MD);
+  }
+  if (step === 'edit_profil_kontak') {
+    if (input !== '-') d.temp.kontak = input;
+    await setAdminState(chatId, 'edit_profil_logo', d);
+    return tg.sendMessage(chatId, `📸 Terakhir, silakan Upload *Foto Logo Usaha*.\n_(Ketik "-" jika Anda tetap ingin menggunakan foto yang lama)_`, MD);
+  }
+  if (step === 'edit_profil_logo') {
+    if (hasPhoto) {
+      const fileId = msg.photo[msg.photo.length - 1].file_id;
+      d.temp.logo = await tg.getFileUrl(fileId).catch(() => d.temp.logo);
+    } else if (input !== '-') {
+      return tg.sendMessage(chatId, "❌ Harap kirimkan foto/logo yang valid, atau ketik '-' untuk melewati proses ini.");
+    }
+    await saveProfile(d.temp);
+    await clearAdminState(chatId);
+    return tg.sendMessage(chatId,
+      `✅ *Profil Berhasil Disimpan!*\n\n🏢 ${d.temp.nama}\n📍 ${d.temp.alamat}\n📞 ${d.temp.kontak}`,
+      { ...MD, ...kb(BACK_MAIN) });
+  }
+
+  // --- Tambah produk ---
+  if (step === 'add_id') { d.temp.id = input; await setAdminState(chatId, 'add_nama', d); return tg.sendMessage(chatId, '📝 *Sip!* Sekarang kirimkan *Nama Produk* tersebut:', MD); }
+  if (step === 'add_nama') { d.temp.nama = input; await setAdminState(chatId, 'add_kat', d); return tg.sendMessage(chatId, '🏷️ Kirimkan *Kategori* untuk produk ini:', MD); }
+  if (step === 'add_kat') { d.temp.kat = input; await setAdminState(chatId, 'add_desc', d); return tg.sendMessage(chatId, '📜 Kirimkan *Deskripsi* panjang produknya:', MD); }
+  if (step === 'add_desc') { d.temp.desc = input; await setAdminState(chatId, 'add_hrg', d); return tg.sendMessage(chatId, '💰 Kirimkan *Harga* (Contoh: 50000 atau Dapat 2: 25000):', MD); }
+  if (step === 'add_hrg') { d.temp.hrg = input; await setAdminState(chatId, 'add_stok', d); return tg.sendMessage(chatId, '📦 Kirimkan jumlah *Stok*:', MD); }
+  if (step === 'add_stok') { d.temp.stok = input; await setAdminState(chatId, 'add_foto', d); return tg.sendMessage(chatId, '📸 *Terakhir!* Silakan kirim (Upload) *FOTO PRODUK* tersebut ke sini:', MD); }
+  if (step === 'add_foto') {
+    if (!hasPhoto) return tg.sendMessage(chatId, '❌ Harap kirimkan gambar/foto yang valid.');
+    const wait = await tg.sendMessage(chatId, '⏳ _Menyimpan ke database..._', MD);
+    try {
+      const fileId = msg.photo[msg.photo.length - 1].file_id;
+      d.temp.link = await tg.getFileUrl(fileId);
+      await saveProduk(d.temp);
+      await logActivity('produk', `Produk ${d.temp.id} ditambahkan: ${d.temp.nama}`);
+      await tg.editMessageText(chatId, wait.message_id,
+        `✅ *Produk Berhasil Ditambahkan!*\n\n📦 ID: ${d.temp.id}\n🏷️ Nama: ${d.temp.nama}`,
+        { ...MD, ...kb(BACK_MAIN) });
+    } catch { await tg.editMessageText(chatId, wait.message_id, '❌ Gagal menyimpan database.'); }
+    await clearAdminState(chatId);
+    return;
+  }
+
+  // --- Edit produk ---
+  if (step === 'edit_find') {
+    const wait = await tg.sendMessage(chatId, '⏳ _Mencari produk..._', MD);
+    const prod = await getProduk(input);
+    await tg.deleteMessage(chatId, wait.message_id);
+    if (!prod) return tg.sendMessage(chatId, '❌ Produk tidak ditemukan. Silakan kirimkan ID yang benar, atau ketik /batal.');
+    await setAdminState(chatId, 'edit_nama', { temp: prod });
+    return tg.sendMessage(chatId, `Data ditemukan: *${prod.nama}*\n\n📝 Kirimkan *Nama Produk Baru*.\n_(💡 Ketik strip "-" jika tidak ingin mengubah ini)_`, MD);
+  }
+  if (step === 'edit_nama') { if (input !== '-') d.temp.nama = input; await setAdminState(chatId, 'edit_kat', d); return tg.sendMessage(chatId, `🏷️ Kirimkan *Kategori Baru*.\nSaat ini: ${d.temp.kat}\n_(Ketik "-" untuk skip)_`, MD); }
+  if (step === 'edit_kat') { if (input !== '-') d.temp.kat = input; await setAdminState(chatId, 'edit_desc', d); return tg.sendMessage(chatId, `📜 Kirimkan *Deskripsi Baru*.\n_(Ketik "-" untuk skip)_`, MD); }
+  if (step === 'edit_desc') { if (input !== '-') d.temp.desc = input; await setAdminState(chatId, 'edit_hrg', d); return tg.sendMessage(chatId, `💰 Kirimkan *Harga Baru*.\nSaat ini: ${d.temp.hrg}\n_(Ketik "-" untuk skip)_`, MD); }
+  if (step === 'edit_hrg') { if (input !== '-') d.temp.hrg = input; await setAdminState(chatId, 'edit_stok', d); return tg.sendMessage(chatId, `📦 Kirimkan *Stok Baru*.\nSaat ini: ${d.temp.stok}\n_(Ketik "-" untuk skip)_`, MD); }
+  if (step === 'edit_stok') { if (input !== '-') d.temp.stok = input; await setAdminState(chatId, 'edit_foto', d); return tg.sendMessage(chatId, `📸 Terakhir, Kirimkan *Foto Produk Baru*.\n_(💡 Ketik "-" jika Anda tetap ingin menggunakan foto yang lama)_`, MD); }
+  if (step === 'edit_foto') {
+    const wait = await tg.sendMessage(chatId, '⏳ _Memperbarui database..._', MD);
+    try {
+      if (hasPhoto) {
+        const fileId = msg.photo[msg.photo.length - 1].file_id;
+        d.temp.link = await tg.getFileUrl(fileId);
+      } else if (input !== '-') {
+        await tg.editMessageText(chatId, wait.message_id, "❌ Harap kirimkan gambar/foto, atau ketik '-' untuk melewati proses edit foto.");
+        return;
+      }
+      await saveProduk(d.temp);
+      await logActivity('produk', `Produk ${d.temp.id} diperbarui: ${d.temp.nama}`);
+      await tg.editMessageText(chatId, wait.message_id,
+        `✅ *Produk Berhasil Diperbarui!*\n\n📦 ID: ${d.temp.id}\n🏷️ Nama: ${d.temp.nama}`,
+        { ...MD, ...kb(BACK_MAIN) });
+    } catch { await tg.editMessageText(chatId, wait.message_id, '❌ Gagal memperbarui database.'); }
+    await clearAdminState(chatId);
+    return;
+  }
+
+  // --- Cek pesanan ---
+  if (step === 'input_cek') {
+    const q = input.toLowerCase();
+    const wait = await tg.sendMessage(chatId, '⏳ _Mencari data di database..._', MD);
+    try {
+      const res = await getAllData();
+      const row = res.data.slice(1).find((r) =>
+        String(r[0] || '').toLowerCase().includes(q) ||
+        String(r[2] || '').toLowerCase().includes(q) ||
+        String(r[3] || '').includes(q));
+      if (row) {
+        const items = await getOrderItems(row[0]);
+        const pesanan = items.length ? items.map((i) => `• ${i.nama_produk} (${i.qty}x)`).join('\n') : '-';
+        await tg.editMessageText(chatId, wait.message_id,
+          `📦 *DETAIL (${row[0]})*\n👤 *Nama:* ${row[2]}\n📱 *WA:* ${row[3]}\n📍 *Alamat:* ${row[4]}\n🛒 *Pesanan:* \n${pesanan}\n💰 *Total:* ${rp(row[6])}\n🚦 *Status:* ${row[7]}`, MD);
+      } else {
+        await tg.editMessageText(chatId, wait.message_id, `❌ Data dengan kata kunci *${input}* tidak ditemukan.`, MD);
+      }
+    } catch (e) { await tg.editMessageText(chatId, wait.message_id, `❌ *Terjadi Error:* ${e.message}`, MD); }
+    await clearAdminState(chatId);
+    return;
+  }
+
+  // --- Ubah status ---
+  if (step === 'input_paket_status') {
+    const wait = await tg.sendMessage(chatId, '⏳ _Mencari data..._', MD);
+    try {
+      const res = await getAllData();
+      const row = res.data.slice(1).find((r) =>
+        String(r[0] || '').toUpperCase() === input.toUpperCase() ||
+        String(r[8] || '').toUpperCase() === input.toUpperCase());
+      if (row) {
+        await tg.editMessageText(chatId, wait.message_id, `📦 *ID Pesanan:* ${row[0]}\nSilakan pilih status baru:`, {
+          ...kb([
+            [{ text: 'Diproses', callback_data: `setstatus_${row[0]}_Diproses_${row[3]}` }, { text: 'Dikirim', callback_data: `setstatus_${row[0]}_Dikirim_${row[3]}` }],
+            [{ text: 'Selesai', callback_data: `setstatus_${row[0]}_Selesai_${row[3]}` }],
+          ]),
+        });
+      } else {
+        await tg.editMessageText(chatId, wait.message_id, `❌ ID Pesanan *${input}* tidak ditemukan.`, MD);
+      }
+    } catch (e) { await tg.editMessageText(chatId, wait.message_id, `❌ *Terjadi Error:* ${e.message}`, MD); }
+    await clearAdminState(chatId);
+    return;
+  }
+
+  // --- Edukasi: kirim form / produk ke WA pelanggan ---
+  if (step.startsWith('input_wa_edu_')) {
+    const wa = formatWA(input);
+    const jenis = step.split('_')[3];
+    if (jenis === 'prod') {
+      await setAdminState(chatId, 'input_id_edu_prod', { tempWa: wa });
+      return tg.sendMessage(chatId, `✅ Nomor WA tersimpan: *${wa}*\n\n📦 Sekarang ketikkan *Kode/ID Produk* dari katalog:`, MD);
+    }
+    const profile = await getProfile();
+    let teks = '';
+    if (jenis === 'kwi') teks = `📝 *Template Kwitansi*\nNomor pesanan: \nNama Usaha: ${profile.nama}\nAlamat: ${profile.alamat}\nKontak: ${profile.kontak}\nCatatan:\n\n_(Logo Tersedia di Sistem)_`;
+    if (jenis === 'not') teks = `📝 *Template Nota*\nNama Usaha: ${profile.nama}\nJenis Usaha:\nAlamat: ${profile.alamat}\nKontak: ${profile.kontak}\nPilihan Model: Landscape / Portrait\nCatatan:`;
+    if (teks) {
+      if (profile.logo) await queueWA(wa, 'image', profile.logo, teks);
+      else await queueWA(wa, 'text', teks);
+    }
+    await clearAdminState(chatId);
+    return tg.sendMessage(chatId, `✅ Form berhasil dikirim ke WA pelanggan (${wa}) dengan kop/profil Usaha Anda!`);
+  }
+
+  if (step === 'input_id_edu_prod') {
+    const wa = d.tempWa;
+    const idProduk = input.toUpperCase();
+    const wait = await tg.sendMessage(chatId, '⏳ _Mencari data produk dan mengirim..._', MD);
+    try {
+      const prod = await getProduk(idProduk);
+      if (!prod) {
+        await tg.editMessageText(chatId, wait.message_id, `❌ Produk dengan ID *${idProduk}* tidak ditemukan. Silakan kirimkan ID yang benar atau ketik /batal.`, MD);
+        return;
+      }
+      let displayHarga = prod.hrg;
+      if (!isNaN(prod.hrg) && String(prod.hrg).trim() !== '') displayHarga = 'Rp ' + parseInt(prod.hrg, 10).toLocaleString('id-ID');
+      const teksProduk = `✨ *DETAIL PRODUK KAMI*\n\n📦 *ID:* ${prod.id}\n🏷️ *Nama:* ${prod.nama}\n📂 *Kategori:* ${prod.kat}\n\n📜 *Deskripsi:*\n${prod.desc}\n\n💰 *Harga:* ${displayHarga}\n📊 *Sisa Stok:* ${prod.stok}\n\n_Berminat? Silakan balas pesan ini ya kak!_`;
+      if (prod.link) await queueWA(wa, 'image', prod.link, teksProduk);
+      else await queueWA(wa, 'text', teksProduk);
+      await tg.editMessageText(chatId, wait.message_id,
+        `✅ *BERHASIL!*\nDetail produk *${prod.nama}* telah dikirim ke WA pelanggan: ${wa}`,
+        { ...MD, ...kb([[{ text: '🔙 Kembali ke Menu', callback_data: 'home' }]]) });
+    } catch (e) { await tg.editMessageText(chatId, wait.message_id, `❌ *Terjadi Kesalahan:* ${e.message}`, MD); }
+    await clearAdminState(chatId);
+    return;
+  }
+
+  return null;
+}
+
+// ---------- FITUR JUALAN: Kirim gambar manual via /kirim ----------
+// Format caption: /kirim 62812xxxx  atau  /kirim INV-xxxxxx
+// Foto diteruskan ke WA customer via wa_outbox (image_url).
+async function handleKirimGambar(chatId, msg, captionText) {
+  const arg = captionText.replace(/^\/kirim\s+/i, '').trim();
+  if (!arg) {
+    return tg.sendMessage(chatId, '❌ Format: kirim foto dengan caption `/kirim 62812xxxx` atau `/kirim INV-xxxxxx`', MD);
+  }
+  const waitMsg = await tg.sendMessage(chatId, '⏳ _Mengirim gambar..._', MD);
+  try {
+    const fileId = msg.photo[msg.photo.length - 1].file_id;
+    const fileUrl = await tg.getFileUrl(fileId);
+    if (!fileUrl) throw new Error('Gagal dapat URL file');
+
+    let toWa = null;
+    let orderId = null;
+
+    // Cek apakah arg adalah INV-xxxxxx
+    const invM = arg.match(/INV-\d{6}/i);
+    if (invM) {
+      orderId = invM[0].toUpperCase();
+      const orders = await sbGet('orders', { select: 'nomor_wa,nama_penerima', id: `eq.${orderId}`, limit: 1 });
+      if (!orders[0] || !orders[0].nomor_wa) {
+        await tg.editMessageText(chatId, waitMsg.message_id, `❌ Order *${orderId}* tidak ditemukan / tidak ada nomor WA.`, MD);
+        return;
+      }
+      toWa = orders[0].nomor_wa;
+    } else {
+      // Anggap nomor WA langsung
+      toWa = formatWA(arg);
+      if (toWa.length < 10) {
+        await tg.editMessageText(chatId, waitMsg.message_id, '❌ Nomor WA tidak valid.', MD);
+        return;
+      }
+    }
+
+    // Antrekan ke WA via wa_outbox dengan image_url
+    await queueWA(toWa, 'image', fileUrl, captionText.replace(/^\/kirim\s+\S+\s*/i, '').trim() || null, fileUrl);
+    await logActivity('kirim_gambar', `Gambar dikirim ke ${toWa}${orderId ? ` (${orderId})` : ''} via WA.`);
+    await tg.editMessageText(chatId, waitMsg.message_id,
+      `✅ *Gambar masuk antrean WA*\\nTujuan: ${toWa}${orderId ? `\\nOrder: ${orderId}` : ''}`, MD);
+  } catch (e) {
+    await tg.editMessageText(chatId, waitMsg.message_id, `❌ *Gagal:* ${e.message}`, MD).catch(() => {});
+  }
+}
+
+// ---------- FITUR JUALAN: /invoice ----------
+async function handleInvoice(chatId, orderId) {
+  const waitMsg = await tg.sendMessage(chatId, '⏳ _Membuat invoice..._', MD);
+  try {
+    const { generateInvoice } = require('./invoice');
+    // Ambil order + items
+    const orders = await sbGet('orders', {
+      select: 'id,tanggal,nama_penerima,nomor_wa,alamat_lengkap,total_harga,status',
+      id: `eq.${orderId}`, limit: 1,
+    });
+    if (!orders[0]) {
+      await tg.editMessageText(chatId, waitMsg.message_id, `❌ Order *${orderId}* tidak ditemukan.`, MD);
+      return;
+    }
+    const items = await sbGet('order_items', {
+      select: 'nama_produk,qty,harga_satuan', order_id: `eq.${orderId}`,
+    }).catch(() => []);
+    const pdfBuffer = await generateInvoice({ ...orders[0], items });
+    await tg.sendDocument(chatId, pdfBuffer, `Invoice-${orderId}.pdf`,
+      `🧾 *Invoice ${orderId}*\nTotal: ${rp(orders[0].total_harga)}`);
+    await tg.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
+    await logActivity('invoice', `Invoice ${orderId} dibuat & dikirim ke admin.`);
+  } catch (e) {
+    await tg.editMessageText(chatId, waitMsg.message_id, `❌ *Gagal buat invoice:* ${e.message}`, MD).catch(() => {});
+  }
+}
+
+// ---------- FITUR JUALAN: kirim invoice PDF ke WA customer ----------
+async function handleInvoiceToWA(chatId, orderId) {
+  const waitMsg = await tg.sendMessage(chatId, '⏳ _Membuat invoice & mengirim ke WA customer..._', MD);
+  try {
+    const { generateInvoice } = require('./invoice');
+    const orders = await sbGet('orders', {
+      select: 'id,tanggal,nama_penerima,nomor_wa,alamat_lengkap,total_harga,status',
+      id: `eq.${orderId}`, limit: 1,
+    });
+    if (!orders[0]) {
+      await tg.editMessageText(chatId, waitMsg.message_id, `❌ Order *${orderId}* tidak ditemukan.`, MD);
+      return;
+    }
+    const order = orders[0];
+    const toWa = formatWA(order.nomor_wa);
+    if (!toWa || toWa.length < 10) {
+      await tg.editMessageText(chatId, waitMsg.message_id, `❌ Nomor WA customer tidak valid.`, MD);
+      return;
+    }
+    const items = await sbGet('order_items', {
+      select: 'nama_produk,qty,harga_satuan', order_id: `eq.${orderId}`,
+    }).catch(() => []);
+    const pdfBuffer = await generateInvoice({ ...order, items });
+
+    // Upload ke Supabase Storage (bucket 'invoices', public)
+    const fileName = `Invoice-${orderId}-${Date.now()}.pdf`;
+    const upRes = await fetch(`${SB_URL}/storage/v1/object/invoices/${fileName}`, {
+      method: 'POST',
+      headers: { ...sbHeaders(), 'Content-Type': 'application/pdf' },
+      body: pdfBuffer,
+    });
+    if (!upRes.ok) {
+      const t = await upRes.text().catch(() => '');
+      throw new Error(`Upload storage gagal (${upRes.status}): ${t.slice(0, 120)}`);
+    }
+    const publicUrl = `${SB_URL}/storage/v1/object/public/invoices/${fileName}`;
+
+    // Antrekan ke WA sebagai dokumen
+    await queueWA(toWa, 'document', publicUrl, `Invoice-${orderId}.pdf`);
+    await logActivity('invoice_wa', `Invoice ${orderId} dikirim ke WA ${toWa}.`);
+    await tg.editMessageText(chatId, waitMsg.message_id,
+      `✅ *Invoice ${orderId} masuk antrean WA*\nTujuan: ${order.nama_penerima} (${toWa})\nPanel akan mengirim PDF-nya via WhatsApp.`, MD);
+  } catch (e) {
+    await tg.editMessageText(chatId, waitMsg.message_id, `❌ *Gagal:* ${e.message}`, MD).catch(() => {});
+  }
+}
+
+// ---------- FITUR JUALAN: /broadcast ----------
+async function handleBroadcastConfirm(chatId, pesan) {
+  // Hitung jumlah customer unik
+  let total = 0;
+  try {
+    const rows = await sbGet('customers', { select: 'nomor_wa', limit: 1000 });
+    const unik = new Set(rows.map((r) => String(r.nomor_wa || '').replace(/\D/g, '')).filter((n) => n.length >= 10));
+    total = unik.size;
+  } catch {}
+  await setAdminState(chatId, 'broadcast_confirm', { pesan });
+  return tg.sendMessage(chatId,
+    `📢 *KONFIRMASI BROADCAST*\n\nPesan:\n${pesan.slice(0, 300)}\n\nAkan dikirim ke *${total} customer* via WA.\n\nKetik *YA* untuk lanjut, atau */batal* untuk batalkan.`,
+    MD);
+}
+
+async function handleBroadcastExec(chatId, pesan) {
+  await clearAdminState(chatId);
+  const waitMsg = await tg.sendMessage(chatId, '⏳ _Menyiapkan broadcast..._', MD);
+  try {
+    const rows = await sbGet('customers', { select: 'nomor_wa,nama', limit: 1000 });
+    const seen = new Set();
+    let count = 0;
+    for (const r of rows) {
+      const wa = String(r.nomor_wa || '').replace(/\D/g, '');
+      if (wa.length < 10 || seen.has(wa)) continue;
+      seen.add(wa);
+      await queueWA(wa, 'text', pesan);
+      count++;
+      // Rate limit: jeda sudah ditangani di poller panel (2 detik antar kirim)
+    }
+    await tg.editMessageText(chatId, waitMsg.message_id,
+      `✅ *Broadcast masuk antrean!*\n${count} pesan akan dikirim via WA (jeda 2 detik per pesan).`, MD);
+    await logActivity('broadcast', `Broadcast ke ${count} customer: ${pesan.slice(0, 100)}`);
+  } catch (e) {
+    await tg.editMessageText(chatId, waitMsg.message_id, `❌ *Gagal:* ${e.message}`, MD).catch(() => {});
+  }
+}
+
+// ---------- Foto tanpa state: OCR resi otomatis ----------
+async function handleFotoOtomatis(chatId, msg, captionText) {
+  // Foto + caption ID → kirim resi manual langsung
+  if (captionText) {
+    const idPesanan = captionText.trim().toUpperCase();
+    const wait = await tg.sendMessage(chatId, '⏳ _Mengirim Resi..._', MD);
+    try {
+      const fileId = msg.photo[msg.photo.length - 1].file_id;
+      const fileLink = await tg.getFileUrl(fileId);
+      const hari = await kirimResiKeCustomer(chatId, idPesanan, fileLink, false);
+      if (hari === null) await tg.editMessageText(chatId, wait.message_id, `❌ ID *${idPesanan}* tidak ditemukan di Database.`, MD);
+      else await tg.editMessageText(chatId, wait.message_id, `✅ *SUKSES*\nResi *${idPesanan}* terkirim. Timer: ${hari} Hari`, MD);
+    } catch (e) { await tg.editMessageText(chatId, wait.message_id, `❌ *Gagal:* ${e.message}`, MD); }
+    return;
+  }
+  // Foto polos (atau caption bebas) → OCR otomatis: ekstrak INV, no resi, penerima
+  const fileId = msg.photo[msg.photo.length - 1].file_id;
+  await tg.sendMessage(chatId, '⏳ _Menganalisis resi dengan AI..._', { ...MD, reply_to_message_id: msg.message_id });
+  const fileUrl = await tg.getFileUrl(fileId).catch(() => null);
+  const ocr = fileUrl ? await ocrImage(fileUrl) : { ok: false };
+  if (!ocr.ok) return tg.sendMessage(chatId, '❌ *GAGAL:* Gambar tidak terbaca oleh AI.\nCoba kirim dengan caption `/kirim INV-xxxxxx`', { ...MD, reply_to_message_id: msg.message_id });
+
+  const info = extractResiInfo(ocr.text);
+  console.log('[ocr-resi]', JSON.stringify(info));
+
+  // Cari order: prioritaskan INV, fallback ke nama penerima
+  let order = null;
+  if (info.inv) {
+    const rows = await sbGet('orders', { select: 'id,nama_penerima,nomor_wa,alamat_lengkap,status', id: `eq.${info.inv}`, limit: 1 }).catch(() => []);
+    if (rows[0]) order = rows[0];
+  }
+  if (!order && info.penerima) {
+    // Cari by nama (fuzzy: cocokkan 3+ huruf awal)
+    const rows = await sbGet('orders', { select: 'id,nama_penerima,nomor_wa,alamat_lengkap,status', order: 'tanggal.desc', limit: 50 }).catch(() => []);
+    const key = info.penerima.toLowerCase().slice(0, 5);
+    order = rows.find((r) => String(r.nama_penerima || '').toLowerCase().includes(key));
+  }
+
+  if (!order) {
+    return tg.sendMessage(chatId,
+      '❌ *Nomor pesanan tidak terbaca / tidak ketemu.*\nCoba kirim dengan caption `/kirim INV-xxxxxx`',
+      { ...MD, reply_to_message_id: msg.message_id });
+  }
+
+  // Update order: status dikirim + nomor resi (bila terbaca)
+  const patchData = { status: 'dikirim' };
+  if (info.resi) patchData.nomor_resi = info.resi;
+  await sbPatch('orders', { id: `eq.${order.id}` }, patchData).catch((e) => console.error('[ocr-resi] patch gagal:', e.message));
+
+  // Antrekan foto resi + notifikasi ke WA customer
+  const hari = getEstimasi(order.alamat_lengkap);
+  const pesanWA = `📦 *PESANAN DIKIRIM (${order.id})*\n\nHalo kak ${order.nama_penerima}! Paket sudah diserahkan ke kurir. 🚚\n${info.resi ? `*No. Resi:* ${info.resi}${info.resiKurir ? ` (${info.resiKurir})` : ''}\n` : ''}(Otomatis selesai dalam ${hari} hari)`;
+  if (order.nomor_wa) {
+    await queueWA(order.nomor_wa, 'image', fileUrl, pesanWA, fileUrl);
+  }
+  await logActivity('resi', `Resi ${order.id} terkirim via OCR otomatis. Resi: ${info.resi || '-'}. Estimasi ${hari} hari.`);
+
+  return tg.sendMessage(chatId,
+    `✅ *Resi terkirim ke ${order.nama_penerima} via WA.*\nStatus → Dikirim 🚚\n${info.resi ? `No. Resi: ${info.resi}` : ''}`,
+    { ...MD, reply_to_message_id: msg.message_id });
+}
+
+// ---------- Pintasan marketplace: !\n[resi]\n[wa] ----------
+async function handleMarketplace(chatId, text) {
+  const parts = text.substring(1).trim().split(/\r?\n|\s+/);
+  if (parts.length < 2) return null;
+  const idPesanan = parts[0].trim().toUpperCase();
+  const nowa = formatWA(parts.slice(1).join(''));
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jakarta' }));
+  const p = (n) => String(n).padStart(2, '0');
+  const tglOrder = `${p(now.getDate())}/${p(now.getMonth() + 1)}/${now.getFullYear()}`;
+  try {
+    const res = await getAllData();
+    const isExist = res.data.slice(1).find((r) => String(r[0]).toUpperCase() === idPesanan);
+    if (isExist) return tg.sendMessage(chatId, `⚠️ *Gagal Menyimpan*\nNomor Pesanan/Resi *${idPesanan}* sudah ada di dalam database!`, MD);
+    await sbPost('orders', [{
+      id: idPesanan, nama_penerima: 'Customer MKT', nomor_wa: nowa, alamat_lengkap: 'Marketplace',
+      total_harga: 0, status: 'diproses', nomor_resi: idPesanan,
+    }], 'return=minimal');
+    await logActivity('order', `Pesanan marketplace ${idPesanan}, WA ${nowa}. Status Diproses.`);
+    return tg.sendMessage(chatId, `✅ *Data Marketplace Tersimpan!*\n📦 Resi: *${idPesanan}*\n📱 WA: *${nowa}*\n🚦 Status: *Diproses ⚙️*`, MD);
+  } catch { return tg.sendMessage(chatId, '❌ Gagal.'); }
+}
+
+// ---------- Template order terisi → buat order + QRIS ----------
+async function handleTemplateOrder(chatId, text) {
+  const waMatch = text.match(/Nomor wa Penerima:\s*(.+)/i);
+  if (!waMatch) return tg.sendMessage(chatId, '❌ WA wajib isi!');
+  const namaMatch = text.match(/Nama Penerima:\s*(.+)/i);
+  const alamatMatch = text.match(/Alamat lengkap:\s*(.+)/i);
+  const namaPenerima = namaMatch ? namaMatch[1].trim() : 'Customer';
+  const alamatPenerima = alamatMatch ? alamatMatch[1].trim() : '-';
+  const nowa = formatWA(waMatch[1]);
+  const idPesanan = 'INV-' + Math.floor(100000 + Math.random() * 900000);
+  const prod = [...text.matchAll(/Nama Produk:\s*(.+)/gi)];
+  const qty = [...text.matchAll(/qty:\s*(.+)/gi)];
+  const hrg = [...text.matchAll(/Harga satuan:\s*(.+)/gi)];
+  let totalKeseluruhan = 0; let detailStruk = '';
+  for (let i = 0; i < prod.length; i++) {
+    const q = parseInt(qty[i][1], 10) || 0; const h = parseInt(String(hrg[i][1]).replace(/[^0-9]/g, ''), 10) || 0;
+    const subtotal = q * h; totalKeseluruhan += subtotal;
+    detailStruk += `• ${prod[i][1].trim()} (${q}x) = ${rp(subtotal)}\n`;
+  }
+  try {
+    const qris = await payinaja.createQRIS(totalKeseluruhan, idPesanan, namaPenerima, nowa);
+    if (!qris.ok) return tg.sendMessage(chatId, `❌ Gagal QRIS. Alasan dari Payinaja: ${qris.error}`);
+    await sbPost('orders', [{
+      id: idPesanan, nama_penerima: namaPenerima, nomor_wa: nowa, alamat_lengkap: alamatPenerima,
+      total_harga: totalKeseluruhan, status: 'pending', payment_trx_id: qris.trx_id,
+    }], 'return=minimal');
+    for (let i = 0; i < prod.length; i++) {
+      const q = parseInt(qty[i][1], 10) || 0; const h = parseInt(String(hrg[i][1]).replace(/[^0-9]/g, ''), 10) || 0;
+      await sbPost('order_items', [{ order_id: idPesanan, nama_produk: prod[i][1].trim(), qty: q, harga_satuan: h }], 'return=minimal').catch(() => {});
+    }
+    await queueWA(nowa, 'image', qris.qr_image_url,
+      `Halo kak *${namaPenerima}*!\nID: *${idPesanan}*\n\n${detailStruk}\n*TOTAL: ${rp(totalKeseluruhan)}*\nSilakan scan QRIS untuk membayar.`);
+    await logActivity('order', `Pesanan baru ${idPesanan} (template admin): ${rp(totalKeseluruhan)}. QRIS terkirim.`);
+    return tg.sendMessage(chatId, `✅ Sukses! QRIS terkirim untuk *${idPesanan}*.`, MD);
+  } catch { return tg.sendMessage(chatId, '❌ Error jaringan saat menghubungi API.'); }
+}
+
+module.exports = { showHome, handleCallback, handleMessage, getAdminState, setAdminState, clearAdminState, queueWA, getProfile };
