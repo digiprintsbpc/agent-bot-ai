@@ -2358,9 +2358,19 @@ function showObjPopup(objKey) {
   const popup = document.getElementById('objPopup');
   const title = document.getElementById('objTitle');
   const content = document.getElementById('objContent');
+  const card = popup ? popup.querySelector('.obj-popup-card') : null;
   if (!popup) return;
 
-  if (objKey.startsWith('screen-')) {
+  // Reset ukuran popup ke default
+  if (card) { card.style.maxWidth = ''; card.style.width = ''; }
+
+  if (objKey === 'screen-A0') {
+    // Monitor Lexa (ketua) → tampilkan dashboard web dalam iframe
+    title.textContent = '💻 Komputer Lexa — Dashboard Toko';
+    content.innerHTML = `<iframe src="/dash/" style="width:100%;height:560px;border:0;border-radius:8px;background:#fff" title="Dashboard Toko" loading="lazy"></iframe>
+    <p style="margin:10px 0 0;color:var(--muted);font-size:12px">Dashboard live — masukkan PIN untuk melihat data omset.</p>`;
+    if (card) { card.style.maxWidth = '860px'; card.style.width = 'calc(100% - 32px)'; }
+  } else if (objKey.startsWith('screen-')) {
     const deskId = objKey.slice(7);
     const d = desks[deskId];
     const who = d?.who;
