@@ -2,7 +2,8 @@
 
 Agent AI Telegram: ngobrol natural (dengan memory), skill toko (stok/pesanan/omset
 via Supabase), skill security-audit, dan catatan penting. Otak: **Groq** (utama,
-gratis) dengan **failover otomatis ke NVIDIA** (cadangan, gratis).
+gratis) dengan **failover otomatis ke NVIDIA** (cadangan, gratis)
+dan **EXTRA** (cadangan tambahan OpenAI-compatible, opsional).
 
 ## Arsitektur
 
@@ -42,6 +43,8 @@ dari migrasi sebelumnya — tidak perlu diulang.
    - `WEBHOOK_SECRET` — string acak (mis. hasil `openssl rand -hex 16`)
    - `GROQ_API_KEY`, `GROQ_MODEL` (= `openai/gpt-oss-120b`)
    - `NVIDIA_API_KEY`, `NVIDIA_MODEL` (= `meta/llama-3.2-11b-vision-instruct`)
+   - `EXTRA_NAME`, `EXTRA_API_KEY`, `EXTRA_BASE_URL`, `EXTRA_MODEL`
+     (opsional — provider OpenAI-compatible tambahan, mis. `glm-5.3`)
    - `SUPABASE_URL` (= `https://evldginxhscydjhmdkjn.supabase.co`)
    - `SUPABASE_SERVICE_KEY` — service_role key (Reveal di dashboard Supabase)
 4. Deploy. Catat URL project, mis. `https://agent-ai.vercel.app`.
@@ -76,3 +79,8 @@ Buka `https://PROJECT.vercel.app/dashboard.html` untuk melihat aktivitas agent.
   biasanya cukup. Kalau sering timeout, pertimbangkan Vercel Pro.
 - Kuota gratis Groq/NVIDIA ada batas harian — kalau kena 429, agent otomatis
   coba provider cadangan, lalu bilang terus terang bila keduanya habis.
+
+## Kredit
+Frontend kantor 3D di `public/kerja/` diadaptasi dari
+[humaedihume/kantor-agent](https://github.com/humaedihume/kantor-agent) (MIT),
+termasuk three.js (MIT). Buka di `/kerja/`.
