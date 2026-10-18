@@ -14,6 +14,7 @@ const memory = require('../lib/memory');
 const toko = require('../lib/toko');
 const security = require('../lib/security');
 const customer = require('../lib/customer');
+const admin = require('../lib/admin');
 
 const GREETING_RE = /^(halo+|hallo+|hai+|hello+|hi+|pagi+|siang+|sore+|malam+|assalamu\s*alaikum|tes|test)(\s+k[ak]+)?[!?.\s]*$/i;
 const GREETINGS = [
@@ -64,6 +65,12 @@ async function handleText(userId, text) {
     // tanpa /toko: lanjut ke general chat
   }
 
+  // --- Menu admin (tombol, sama persis bot lama) ---
+  if (q === '/menu') {
+    await admin.showHome(userId);
+    return null; // sudah dikirim langsung
+  }
+
   // --- Skill SECURITY-AUDIT ---
   const auditMatch = q.match(/^\/audit\s+(.+)/is);
   if (auditMatch || security.isSecurityQuestion(q)) {
@@ -108,6 +115,19 @@ module.exports = async (req, res) => {
     }
 
     const update = req.body || {};
+
+    // ---------- CALLBACK QUERY (tombol inline admin) ----------
+    const cb = update.callback_query;
+    if (cb) {
+      const cbUser = String(cb.message.chat.id);
+      const allowed = opt('TELEGRAM_ALLOWED_ID', '');
+      if (!allowed || cbUser !== allowed) return res.status(200).send('ok'); // hanya owner
+      try {
+        await admin.handleCallback(cbUser, cb.message.chat.id, cb.data, cb.id);
+      } catch (e) { console.error('[admin-cb] error:', e.message); }
+      return res.status(200).send('ok');
+    }
+
     const msg = update.message;
     if (!msg) return res.status(200).send('ok');
 
@@ -115,12 +135,16 @@ module.exports = async (req, res) => {
     const allowed = opt('TELEGRAM_ALLOWED_ID', '');
     const isOwner = !allowed || userId === allowed;
 
-    // Pelanggan kirim foto (tanpa teks) → minta teks
-    if (!isOwner && msg.photo && !msg.text) {
-      await sendMessage(userId, 'Untuk pesan barang, kirim dalam bentuk teks ya kak 😊').catch(() => {});
+    // Pelanggan kirim foto → cek bukti transfer bila lagi menunggu pembayaran
+    if (!isOwner && msg.photo && msg.photo.length) {
+      const fileId = msg.photo[msg.photo.length - 1].file_id;
+      let reply;
+      try { reply = await customer.handleCustomerPhoto(userId, fileId); }
+      catch (e) { console.error('[customer-photo] error:', e.message); reply = 'Maaf kak, fotonya gagal diproses. Coba lagi ya.'; }
+      if (reply) await sendMessage(userId, reply).catch((e) => console.error('[send] gagal:', e.message));
       return res.status(200).send('ok');
     }
-    if (!msg.text) return res.status(200).send('ok');
+    if (!msg.text && !msg.caption) return res.status(200).send('ok');
 
     const text = String(msg.text);
     console.log(`[msg] ${userId}${isOwner ? ' (owner)' : ' (customer)'}: ${text.slice(0, 80)}`);
@@ -140,17 +164,30 @@ module.exports = async (req, res) => {
       return res.status(200).send('ok');
     }
 
-    // ---------- MODE OWNER (asisten pribadi) ----------
-    await memory.saveMessage(userId, 'user', text);
+    // ---------- MODE OWNER ----------
+    // 1) Alur admin (menu/tombol/state) didahulukan bila relevan
+    let adminReply = null;
+    try { adminReply = await admin.handleMessage(userId, msg); }
+    catch (e) { console.error('[admin-msg] error:', e.message); }
+    if (adminReply !== null && adminReply !== undefined) {
+      if (adminReply) await sendMessage(userId, adminReply).catch((e) => console.error('[send] gagal:', e.message));
+      return res.status(200).send('ok');
+    }
+
+    // 2) Asisten pribadi (teks bebas)
+    const otext = String(msg.text || msg.caption || '');
+    if (!otext) return res.status(200).send('ok');
+    await memory.saveMessage(userId, 'user', otext);
     let reply;
     try {
-      reply = await handleText(userId, text);
+      reply = await handleText(userId, otext);
     } catch (e) {
       console.error('[handler] error:', e.message);
       reply = e.message.includes('429') || e.message.includes('quota')
         ? 'AI-nya lagi kena batas pemakaian gratis, coba lagi sebentar ya 🙏'
         : 'Maaf, ada gangguan sebentar. Coba lagi ya.';
     }
+    if (reply === null) return res.status(200).send('ok'); // sudah dikirim langsung (mis. /menu)
     await memory.saveMessage(userId, 'assistant', reply);
     await sendMessage(userId, reply);
 

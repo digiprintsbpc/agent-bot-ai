@@ -71,6 +71,29 @@ const rp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
 function catalogText(products) {
   return products.map((p) => `- ${p.nama} — ${rp(p.harga)}`).join('\n');
 }
+// Versi ringkas untuk ditampilkan ke pelanggan: dikelompokkan per ukuran
+function catalogCompact(products) {
+  const lines = [];
+  for (const s of ['1/2', '1/3', '1/4', '1/6', '1/8', '1/10']) {
+    const items = products.filter((p) => p.nama.startsWith(`Nota ${s} folio`));
+    if (!items.length) continue;
+    lines.push(`*${s} folio:*`);
+    for (const ply of [1, 2, 3]) {
+      const p50 = items.find((p) => p.nama.includes(`${ply}ply (50 lembar)`));
+      const p100 = items.find((p) => p.nama.includes(`${ply}ply (100 lbr)`));
+      lines.push(`• ${ply}ply — 50 lbr ${p50 ? rp(p50.harga) : '-'} | 100 lbr ${p100 ? rp(p100.harga) : '-'}`);
+    }
+  }
+  const rims = products.filter((p) => p.kategori === 'Paket Rim');
+  if (rims.length) {
+    lines.push(`*Paket 1 rim (free ongkir Malang):*`);
+    for (const r of rims) {
+      const ply = r.nama.match(/(\d)ply/);
+      lines.push(`• ${ply ? ply[1] + 'ply' : r.nama} — ${rp(r.harga)}`);
+    }
+  }
+  return lines.join('\n');
+}
 
 // ---------- Parse LLM ----------
 function parseJson(s) {
@@ -199,9 +222,20 @@ async function handleCustomer(userId, text, onPhoto) {
   const invMatch = q.match(/INV-\d{6}/i);
   if (invMatch) {
     try {
-      const rows = await sbGet('orders', { select: 'id,total_harga,status,tanggal', id: `eq.${invMatch[0].toUpperCase()}` });
+      const rows = await sbGet('orders', { select: 'id,total_harga,status,tanggal,payment_trx_id', id: `eq.${invMatch[0].toUpperCase()}` });
       if (rows[0]) {
         const o = rows[0];
+        // Bila masih pending & ada trx QRIS (mis. order dari template admin) → cek pembayaran otomatis
+        if (o.status === 'pending' && o.payment_trx_id) {
+          const cek = await payinaja.checkTransaction(o.payment_trx_id).catch(() => ({ ok: false }));
+          if (cek.ok && cek.paid) {
+            await sbPatch('orders', { id: `eq.${o.id}` }, { status: 'diproses' }).catch(() => {});
+            o.status = 'diproses';
+            if (OWNER_ID) {
+              await sendMessage(OWNER_ID, `💰 *PEMBAYARAN MASUK!*\nInvoice: ${o.id}\nTotal: ${rp(o.total_harga)}\n🚦 Status: Diproses ⚙️`).catch(() => {});
+            }
+          }
+        }
         const stMap = { pending: 'Belum Bayar 🔴', diproses: 'Diproses ⚙️', dikirim: 'Dikirim 🚚', selesai: 'Selesai 🥰', batal: 'Batal ❌' };
         return `📦 *${o.id}*\nTotal: ${rp(o.total_harga)}\nStatus: ${stMap[o.status] || o.status}`;
       }
@@ -211,8 +245,34 @@ async function handleCustomer(userId, text, onPhoto) {
     }
   }
 
+  // Step: QRIS gagal dibuat sebelumnya → bisa coba lagi
+  if (session.step === 'qris_failed') {
+    if (/dari awal|mulai lagi|ulang/i.test(q)) {
+      await clearSession(userId);
+      return 'Baik kak, kita mulai dari awal ya. Mau pesan produk apa? 😊';
+    }
+    if (/coba lagi|buat qris|ulangi|retry/i.test(q)) {
+      const qris = await payinaja.createQRIS(d.amount, d.order_id, d.name, d.phone);
+      if (qris.ok && qris.qr_image_url) {
+        await sbPatch('orders', { id: `eq.${d.order_id}` }, { payment_trx_id: qris.trx_id }).catch(() => {});
+        await saveSession(userId, 'awaiting_payment', { ...d, trx_id: qris.trx_id });
+        const caption = `🧾 *Pesanan ${d.order_id}*\n${d.product_nama} × ${d.qty}\n*Total: ${rp(d.amount)}*\n\nSilakan scan QRIS di atas untuk membayar. Setelah bayar, ketik *SUDAH BAYAR*.`;
+        if (onPhoto) { await onPhoto(qris.qr_image_url, caption); return null; }
+        await sendPhoto(userId, qris.qr_image_url, caption);
+        return null;
+      }
+      return `QRIS masih gagal dibuat (${(qris && qris.error) || 'unknown'}). Admin akan menghubungimu ya kak.`;
+    }
+    return `Pesanan *${d.order_id}* sudah tercatat. Ketik *COBA LAGI* untuk coba buat QRIS ulang, atau tunggu admin menghubungimu ya kak.`;
+  }
+
   // Step: menunggu pembayaran
   if (session.step === 'awaiting_payment') {
+    if (!d.trx_id) {
+      // Pengaman: tidak ada QRIS tapi nyasar ke sini → arahkan ke coba lagi
+      await saveSession(userId, 'qris_failed', d);
+      return `QRIS untuk pesanan *${d.order_id}* belum tersedia. Ketik *COBA LAGI* untuk coba lagi ya kak.`;
+    }
     if (/sudah bayar|udah bayar|sudah lunas|udah lunas|lunas/i.test(q)) {
       if (!d.trx_id) return 'Pesananmu belum ada QRIS-nya kak. Hubungi admin ya.';
       const res = await payinaja.checkTransaction(d.trx_id);
@@ -236,13 +296,13 @@ async function handleCustomer(userId, text, onPhoto) {
     if (/^(ya|iya|oke|ok|setuju|lanjut|betul|benar)$/i.test(q)) {
       try {
         const r = await createOrder(d);
-        const newDraft = { ...d, order_id: r.orderId, trx_id: r.trxId, amount: r.total };
-        await saveSession(userId, 'awaiting_payment', newDraft);
         if (OWNER_ID) {
           await sendMessage(OWNER_ID,
             `🛒 *PESANAN BARU* (via Agent)\nInvoice: ${r.orderId}\n${d.product_nama} × ${d.qty} = ${rp(r.total)}\nPelanggan: ${d.name} (${d.phone})\nStatus: Belum Bayar 🔴`).catch(() => {});
         }
         if (r.qrUrl) {
+          const newDraft = { ...d, order_id: r.orderId, trx_id: r.trxId, amount: r.total };
+          await saveSession(userId, 'awaiting_payment', newDraft);
           const caption = `🧾 *Pesanan ${r.orderId}*\n${d.product_nama} × ${d.qty}\n*Total: ${rp(r.total)}*\n\nSilakan scan QRIS di atas untuk membayar. Setelah bayar, ketik *SUDAH BAYAR*.`;
           if (onPhoto) {
             await onPhoto(r.qrUrl, caption);
@@ -251,7 +311,9 @@ async function handleCustomer(userId, text, onPhoto) {
           await sendPhoto(userId, r.qrUrl, caption);
           return null; // foto sudah terkirim sebagai balasan
         }
-        return `Pesanan *${r.orderId}* dibuat, tapi QRIS gagal: ${r.qrisError || 'unknown'}. Admin akan hubungi kakak ya.`;
+        // QRIS gagal → JANGAN masuk awaiting_payment, beri opsi coba lagi
+        await saveSession(userId, 'qris_failed', { ...d, order_id: r.orderId, amount: r.total });
+        return `Pesanan *${r.orderId}* sudah tercatat, tapi QRIS gagal dibuat (${r.qrisError || 'unknown'}).\nKetik *COBA LAGI* untuk coba lagi, atau admin akan menghubungimu ya kak.`;
       } catch (e) {
         console.error('[customer] createOrder gagal:', e.message);
         return 'Maaf kak, pesanan gagal dibuat. Coba lagi atau hubungi admin ya.';
@@ -271,9 +333,14 @@ async function handleCustomer(userId, text, onPhoto) {
   }
   if (!products.length) return 'Maaf kak, katalog produk sedang kosong.';
 
-  // Sapaan pertama pelanggan baru
-  if (session.step === 'idle' && !d.product_id && /^(halo+|hai+|hello+|hi+|pagi+|siang+|sore+|malam+|tes|test)(\s+k[ak]+)?[!?.\s]*$/i.test(q)) {
-    return `Halo kak, selamat datang di Digiprint! 😊\n\nKami menjual nota NCR & kwitansi custom:\n${catalogText(products)}\n\nMau pesan yang mana kak? Tinggal ketik aja, misal: "mau nota 1/2 folio 2ply 100 lembar"`;
+  // Sapaan pertama pelanggan baru: natural, JANGAN langsung sodorkan katalog
+  if (session.step === 'idle' && !d.product_id && /^(halo+|hai+|hello+|hi+|pagi+|siang+|sore+|malam+|tes|test|assalamu\s*alaikum)(\s+k[ak]+)?[!?.\s]*$/i.test(q)) {
+    const greets = [
+      'Halo kak! Selamat datang di Digiprint 😊\nMau pesan nota atau kwitansi custom? Atau mau tanya-tanya dulu juga boleh.',
+      'Halo juga kak! Ada yang bisa saya bantu? 😊\nKami bisa bantu pesankan nota NCR & kwitansi custom.',
+      'Hai kak, selamat datang! 😊\nMau order apa hari ini?',
+    ];
+    return greets[Math.floor(Math.random() * greets.length)];
   }
 
   const p = await parseMessage(q, products, session);
@@ -314,9 +381,11 @@ async function handleCustomer(userId, text, onPhoto) {
   const needWord = { produk: 'produk', jumlah: 'jumlah', nama: 'nama', 'no WA': 'WA', alamat: 'alamat' };
   const asksMissing = missing.some((m) => (p.reply || '').toLowerCase().includes(needWord[m].toLowerCase()));
   if (p.reply && (asksMissing || p.intent === 'ask' || p.intent === 'greeting' || p.intent === 'other')) {
-    // Tambahkan katalog bila produk belum jelas
-    if (!d.product_id && p.intent !== 'greeting') {
-      return `${p.reply}\n\nKatalog kami:\n${catalogText(products)}`;
+    // Katalog HANYA bila diminta eksplisit, atau saat mau pesan tapi produknya belum jelas.
+    // Selain itu (mis. tanya ukuran, tanya harga satuan) → jawab saja, tanpa katalog.
+    const wantsCatalog = /katalog|daftar harga|price list|jualan apa|jual apa|produk apa|semua produk/i.test(q);
+    if (!d.product_id && (wantsCatalog || p.intent === 'order')) {
+      return `${p.reply}\n\nDaftar harga kami kak:\n${catalogCompact(products)}`;
     }
     return p.reply;
   }
@@ -324,4 +393,46 @@ async function handleCustomer(userId, text, onPhoto) {
   return `${p.reply ? p.reply + '\n\n' : ''}Boleh info ${labels[missing[0]]}? 😊`;
 }
 
-module.exports = { handleCustomer, getSession, clearSession };
+// ---------- Bukti transfer dari customer (foto) → OCR ----------
+// Dipakai saat customer kirim foto di Telegram. Untuk WA, foto bukti
+// ditangani terpisah (panel teruskan file ke endpoint ini bila diperlukan).
+async function handleCustomerPhoto(userId, fileId) {
+  const { getFileUrl, sendPhoto } = require('./telegram-api');
+  const { ocrImage, extractAmounts } = require('./ocr');
+  const session = await getSession(userId);
+  const d = (session && session.draft) || {};
+  if (!session || session.step !== 'awaiting_payment' || !d.order_id) {
+    return 'Untuk pesan barang, kirim dalam bentuk teks ya kak 😊';
+  }
+  const fileUrl = await getFileUrl(fileId).catch(() => null);
+  const ocr = fileUrl ? await ocrImage(fileUrl) : { ok: false };
+  if (!ocr.ok) return 'Maaf kak, fotonya tidak terbaca. Coba kirim ulang dengan gambar yang lebih jelas ya.';
+  const amounts = extractAmounts(ocr.text);
+  const read = amounts[0] || 0;
+  const total = Math.round(Number(d.amount) || 0);
+  const cocok = read && Math.abs(read - total) <= 1000;
+  // Teruskan foto + hasil OCR ke owner untuk verifikasi
+  if (OWNER_ID) {
+    const cap = `🧾 *BUKTI TRANSFER*\nPesanan: ${d.order_id}\nPelanggan: ${d.name} (${d.phone})\nTotal tagihan: ${rp(total)}\nTerbaca OCR: ${read ? rp(read) : 'tidak terbaca'} ${cocok ? '✅ COCOK' : '⚠️ BEDA'}\n\nTeks OCR:\n${ocr.text.slice(0, 500)}`;
+    await sendPhoto(OWNER_ID, fileId, cap).catch(() => {});
+  }
+  await logActivitySafe('bukti', `Bukti transfer ${d.order_id}: terbaca ${rp(read)} ${cocok ? '(cocok)' : '(beda)'}`);
+  if (cocok) {
+    return `Bukti transfer diterima kak (terbaca ${rp(read)} ✅). Admin akan verifikasi sebentar ya 🙏`;
+  }
+  return `Bukti diterima kak, tapi nominal yang terbaca (${read ? rp(read) : 'tidak jelas'}) berbeda dengan total ${rp(total)}. Admin akan cek manual ya kak 🙏`;
+}
+
+async function logActivitySafe(aksi, detail) {
+  try {
+    const SB_URL2 = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+    const SB_KEY2 = process.env.SUPABASE_SERVICE_KEY || '';
+    await fetch(`${SB_URL2}/rest/v1/agent_activity`, {
+      method: 'POST',
+      headers: { apikey: SB_KEY2, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify([{ kategori: 'toko', aksi, detail: String(detail).slice(0, 500) }]),
+    });
+  } catch {}
+}
+
+module.exports = { handleCustomer, handleCustomerPhoto, getSession, clearSession };
