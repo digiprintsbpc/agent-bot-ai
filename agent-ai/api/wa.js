@@ -31,6 +31,22 @@ module.exports = async (req, res) => {
     const userId = 'wa:' + cleanFrom;
     console.log(`[wa] ${userId}: ${cleanText.slice(0, 80)}`);
 
+    // --- AI Handoff: cek pause dulu (hemat 1x panggil LLM bila sedang pause) ---
+    try {
+      const SB_U = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+      const SB_K = process.env.SUPABASE_SERVICE_KEY || '';
+      const pr = await fetch(`${SB_U}/rest/v1/ai_pause?user_id=eq.${encodeURIComponent(userId)}&select=paused_until`, {
+        headers: { apikey: SB_K },
+      });
+      if (pr.ok) {
+        const pj = await pr.json();
+        if (pj[0] && pj[0].paused_until && Date.now() < new Date(pj[0].paused_until).getTime()) {
+          console.log(`[wa] AI pause untuk ${userId}`);
+          return res.status(200).json({ reply: null });
+        }
+      }
+    } catch {}
+
     let photo = null;
     let caption = null;
     let reply;

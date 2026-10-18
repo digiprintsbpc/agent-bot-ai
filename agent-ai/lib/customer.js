@@ -39,6 +39,14 @@ async function sbPatch(table, params, body) {
   if (!res.ok) throw new Error(`Supabase PATCH ${table}: ${res.status}`);
   return true;
 }
+async function sbDelete(table, params) {
+  const q = new URLSearchParams(params);
+  const res = await fetch(`${SB_URL}/rest/v1/${table}?${q}`, {
+    method: 'DELETE', headers: sbHeaders(),
+  });
+  if (!res.ok) throw new Error(`Supabase DELETE ${table}: ${res.status}`);
+  return true;
+}
 
 // ---------- Sesi ----------
 async function getSession(userId) {
@@ -264,6 +272,22 @@ function isYes(text) {
 // (dipakai channel WA); bila kosong, dikirim via Telegram dan return null.
 async function handleCustomer(userId, text, onPhoto) {
   const q = String(text || '').trim();
+
+  // --- AI Handoff: cek apakah AI sedang di-pause untuk customer ini ---
+  // (Rizal membalas manual via WA → AI diam sampai paused_until lewat)
+  try {
+    const pauseRows = await sbGet('ai_pause', { select: 'paused_until', user_id: `eq.${userId}` });
+    if (pauseRows[0] && pauseRows[0].paused_until) {
+      const until = new Date(pauseRows[0].paused_until).getTime();
+      if (Date.now() < until) {
+        console.log(`[ai-pause] diam untuk ${userId} sampai ${pauseRows[0].paused_until}`);
+        return null; // diam saja, jangan balas
+      }
+      // Pause sudah kedaluwarsa → hapus barisnya
+      await sbDelete('ai_pause', { user_id: `eq.${userId}` }).catch(() => {});
+    }
+  } catch (e) { console.error('[ai-pause] cek gagal:', e.message); }
+
   let session = await getSession(userId);
   if (!session) session = { user_id: String(userId), step: 'idle', draft: {} };
   const d = session.draft || {};

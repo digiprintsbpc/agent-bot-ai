@@ -9,7 +9,7 @@
  */
 
 const tg = require('./telegram-api');
-const { ocrImage } = require('./ocr');
+const { ocrImage, extractResiInfo } = require('./ocr');
 const payinaja = require('./payinaja');
 
 const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
@@ -139,10 +139,12 @@ async function saveProfile(p) {
   await sbPatch('store_profile', { id: 'eq.1' }, { nama: p.nama, alamat: p.alamat, kontak: p.kontak, logo: p.logo || '' });
 }
 // Antrekan WA: panel yang kirim via Baileys
-async function queueWA(toWa, kind, content, caption) {
-  await sbPost('wa_outbox', [{
+async function queueWA(toWa, kind, content, caption, imageUrl) {
+  const row = {
     to_wa: formatWA(toWa), kind, content, caption: caption || null, status: 'pending',
-  }], 'return=minimal').catch((e) => console.error('[admin] queueWA gagal:', e.message));
+  };
+  if (imageUrl) row.image_url = imageUrl;
+  await sbPost('wa_outbox', [row], 'return=minimal').catch((e) => console.error('[admin] queueWA gagal:', e.message));
 }
 async function logActivity(aksi, detail) {
   sbPost('agent_activity', [{ kategori: 'toko', aksi, detail: String(detail || '').slice(0, 500) }], 'return=minimal').catch(() => {});
@@ -426,6 +428,22 @@ async function handleMessage(chatId, msg) {
 
   const st = await getAdminState(chatId);
   if (!st) {
+    // ===== FITUR JUALAN: /invoice =====
+    const invMatch = text.match(/^\/invoice\s+(INV-\d{6})/i);
+    if (invMatch) return handleInvoice(chatId, invMatch[1].toUpperCase());
+
+    // ===== FITUR JUALAN: /broadcast =====
+    if (text.startsWith('/broadcast ')) {
+      const pesan = text.substring(11).trim();
+      if (!pesan) return tg.sendMessage(chatId, '❌ Format: `/broadcast <pesan>`', MD);
+      return handleBroadcastConfirm(chatId, pesan);
+    }
+    // Konfirmasi broadcast: YA / BATAL
+    // (state broadcast_confirm ditangani di bawah)
+
+    // ===== FITUR JUALAN: foto + caption /kirim =====
+    if (hasPhoto && /^\/kirim\s+/i.test(text)) return handleKirimGambar(chatId, msg, text);
+
     // Foto tanpa state → OCR resi otomatis (seperti bot lama)
     if (hasPhoto) return handleFotoOtomatis(chatId, msg, text);
     // Perintah cepat marketplace: !\n[resi]\n[wa]
@@ -438,6 +456,15 @@ async function handleMessage(chatId, msg) {
   const step = st.step;
   const d = st.data || {};
   const input = text.trim();
+
+  // --- FITUR JUALAN: Konfirmasi broadcast ---
+  if (step === 'broadcast_confirm') {
+    if (/^(ya|iya|oke|ok|lanjut|kirim)$/i.test(input)) {
+      return handleBroadcastExec(chatId, d.pesan || '');
+    }
+    await clearAdminState(chatId);
+    return tg.sendMessage(chatId, '🚫 *Broadcast dibatalkan.*', MD);
+  }
 
   // --- Upload resi massal (OCR) ---
   if (step === 'massal_upload') {
@@ -677,6 +704,117 @@ async function handleMessage(chatId, msg) {
   return null;
 }
 
+// ---------- FITUR JUALAN: Kirim gambar manual via /kirim ----------
+// Format caption: /kirim 62812xxxx  atau  /kirim INV-xxxxxx
+// Foto diteruskan ke WA customer via wa_outbox (image_url).
+async function handleKirimGambar(chatId, msg, captionText) {
+  const arg = captionText.replace(/^\/kirim\s+/i, '').trim();
+  if (!arg) {
+    return tg.sendMessage(chatId, '❌ Format: kirim foto dengan caption `/kirim 62812xxxx` atau `/kirim INV-xxxxxx`', MD);
+  }
+  const waitMsg = await tg.sendMessage(chatId, '⏳ _Mengirim gambar..._', MD);
+  try {
+    const fileId = msg.photo[msg.photo.length - 1].file_id;
+    const fileUrl = await tg.getFileUrl(fileId);
+    if (!fileUrl) throw new Error('Gagal dapat URL file');
+
+    let toWa = null;
+    let orderId = null;
+
+    // Cek apakah arg adalah INV-xxxxxx
+    const invM = arg.match(/INV-\d{6}/i);
+    if (invM) {
+      orderId = invM[0].toUpperCase();
+      const orders = await sbGet('orders', { select: 'nomor_wa,nama_penerima', id: `eq.${orderId}`, limit: 1 });
+      if (!orders[0] || !orders[0].nomor_wa) {
+        await tg.editMessageText(chatId, waitMsg.message_id, `❌ Order *${orderId}* tidak ditemukan / tidak ada nomor WA.`, MD);
+        return;
+      }
+      toWa = orders[0].nomor_wa;
+    } else {
+      // Anggap nomor WA langsung
+      toWa = formatWA(arg);
+      if (toWa.length < 10) {
+        await tg.editMessageText(chatId, waitMsg.message_id, '❌ Nomor WA tidak valid.', MD);
+        return;
+      }
+    }
+
+    // Antrekan ke WA via wa_outbox dengan image_url
+    await queueWA(toWa, 'image', fileUrl, captionText.replace(/^\/kirim\s+\S+\s*/i, '').trim() || null, fileUrl);
+    await logActivity('kirim_gambar', `Gambar dikirim ke ${toWa}${orderId ? ` (${orderId})` : ''} via WA.`);
+    await tg.editMessageText(chatId, waitMsg.message_id,
+      `✅ *Gambar masuk antrean WA*\\nTujuan: ${toWa}${orderId ? `\\nOrder: ${orderId}` : ''}`, MD);
+  } catch (e) {
+    await tg.editMessageText(chatId, waitMsg.message_id, `❌ *Gagal:* ${e.message}`, MD).catch(() => {});
+  }
+}
+
+// ---------- FITUR JUALAN: /invoice ----------
+async function handleInvoice(chatId, orderId) {
+  const waitMsg = await tg.sendMessage(chatId, '⏳ _Membuat invoice..._', MD);
+  try {
+    const { generateInvoice } = require('./invoice');
+    // Ambil order + items
+    const orders = await sbGet('orders', {
+      select: 'id,tanggal,nama_penerima,nomor_wa,alamat_lengkap,total_harga,status',
+      id: `eq.${orderId}`, limit: 1,
+    });
+    if (!orders[0]) {
+      await tg.editMessageText(chatId, waitMsg.message_id, `❌ Order *${orderId}* tidak ditemukan.`, MD);
+      return;
+    }
+    const items = await sbGet('order_items', {
+      select: 'nama_produk,qty,harga_satuan', order_id: `eq.${orderId}`,
+    }).catch(() => []);
+    const pdfBuffer = await generateInvoice({ ...orders[0], items });
+    await tg.sendDocument(chatId, pdfBuffer, `Invoice-${orderId}.pdf`,
+      `🧾 *Invoice ${orderId}*\nTotal: ${rp(orders[0].total_harga)}`);
+    await tg.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
+    await logActivity('invoice', `Invoice ${orderId} dibuat & dikirim ke admin.`);
+  } catch (e) {
+    await tg.editMessageText(chatId, waitMsg.message_id, `❌ *Gagal buat invoice:* ${e.message}`, MD).catch(() => {});
+  }
+}
+
+// ---------- FITUR JUALAN: /broadcast ----------
+async function handleBroadcastConfirm(chatId, pesan) {
+  // Hitung jumlah customer unik
+  let total = 0;
+  try {
+    const rows = await sbGet('customers', { select: 'nomor_wa', limit: 1000 });
+    const unik = new Set(rows.map((r) => String(r.nomor_wa || '').replace(/\D/g, '')).filter((n) => n.length >= 10));
+    total = unik.size;
+  } catch {}
+  await setAdminState(chatId, 'broadcast_confirm', { pesan });
+  return tg.sendMessage(chatId,
+    `📢 *KONFIRMASI BROADCAST*\n\nPesan:\n${pesan.slice(0, 300)}\n\nAkan dikirim ke *${total} customer* via WA.\n\nKetik *YA* untuk lanjut, atau */batal* untuk batalkan.`,
+    MD);
+}
+
+async function handleBroadcastExec(chatId, pesan) {
+  await clearAdminState(chatId);
+  const waitMsg = await tg.sendMessage(chatId, '⏳ _Menyiapkan broadcast..._', MD);
+  try {
+    const rows = await sbGet('customers', { select: 'nomor_wa,nama', limit: 1000 });
+    const seen = new Set();
+    let count = 0;
+    for (const r of rows) {
+      const wa = String(r.nomor_wa || '').replace(/\D/g, '');
+      if (wa.length < 10 || seen.has(wa)) continue;
+      seen.add(wa);
+      await queueWA(wa, 'text', pesan);
+      count++;
+      // Rate limit: jeda sudah ditangani di poller panel (2 detik antar kirim)
+    }
+    await tg.editMessageText(chatId, waitMsg.message_id,
+      `✅ *Broadcast masuk antrean!*\n${count} pesan akan dikirim via WA (jeda 2 detik per pesan).`, MD);
+    await logActivity('broadcast', `Broadcast ke ${count} customer: ${pesan.slice(0, 100)}`);
+  } catch (e) {
+    await tg.editMessageText(chatId, waitMsg.message_id, `❌ *Gagal:* ${e.message}`, MD).catch(() => {});
+  }
+}
+
 // ---------- Foto tanpa state: OCR resi otomatis ----------
 async function handleFotoOtomatis(chatId, msg, captionText) {
   // Foto + caption ID → kirim resi manual langsung
@@ -692,21 +830,51 @@ async function handleFotoOtomatis(chatId, msg, captionText) {
     } catch (e) { await tg.editMessageText(chatId, wait.message_id, `❌ *Gagal:* ${e.message}`, MD); }
     return;
   }
-  // Foto polos → OCR, cocokkan ID pesanan
+  // Foto polos (atau caption bebas) → OCR otomatis: ekstrak INV, no resi, penerima
   const fileId = msg.photo[msg.photo.length - 1].file_id;
-  await tg.sendMessage(chatId, '⏳ _Foto ditambahkan ke antrean AI (Otomatis)..._', { ...MD, reply_to_message_id: msg.message_id });
+  await tg.sendMessage(chatId, '⏳ _Menganalisis resi dengan AI..._', { ...MD, reply_to_message_id: msg.message_id });
   const fileUrl = await tg.getFileUrl(fileId).catch(() => null);
   const ocr = fileUrl ? await ocrImage(fileUrl) : { ok: false };
-  if (!ocr.ok) return tg.sendMessage(chatId, '❌ *GAGAL:* Gambar tidak terbaca oleh AI.', { ...MD, reply_to_message_id: msg.message_id });
-  const ocrText = ocr.text.toUpperCase();
-  const res = await getAllData();
-  const orderMatch = res.data.slice(1).find((r) => {
-    const idDb = String(r[0] || '').toUpperCase();
-    return idDb.length > 3 && ocrText.includes(idDb);
-  });
-  if (!orderMatch) return tg.sendMessage(chatId, '❌ *TIDAK COCOK:* AI salah baca atau nomor tidak ada di database.', { ...MD, reply_to_message_id: msg.message_id });
-  const hari = await kirimResiKeCustomer(chatId, orderMatch[0], fileUrl, true);
-  return tg.sendMessage(chatId, `✅ *BERHASIL: Resi ${orderMatch[0]} terkirim!* Timer: ${hari} Hari.`, { ...MD, reply_to_message_id: msg.message_id });
+  if (!ocr.ok) return tg.sendMessage(chatId, '❌ *GAGAL:* Gambar tidak terbaca oleh AI.\nCoba kirim dengan caption `/kirim INV-xxxxxx`', { ...MD, reply_to_message_id: msg.message_id });
+
+  const info = extractResiInfo(ocr.text);
+  console.log('[ocr-resi]', JSON.stringify(info));
+
+  // Cari order: prioritaskan INV, fallback ke nama penerima
+  let order = null;
+  if (info.inv) {
+    const rows = await sbGet('orders', { select: 'id,nama_penerima,nomor_wa,alamat_lengkap,status', id: `eq.${info.inv}`, limit: 1 }).catch(() => []);
+    if (rows[0]) order = rows[0];
+  }
+  if (!order && info.penerima) {
+    // Cari by nama (fuzzy: cocokkan 3+ huruf awal)
+    const rows = await sbGet('orders', { select: 'id,nama_penerima,nomor_wa,alamat_lengkap,status', order: 'tanggal.desc', limit: 50 }).catch(() => []);
+    const key = info.penerima.toLowerCase().slice(0, 5);
+    order = rows.find((r) => String(r.nama_penerima || '').toLowerCase().includes(key));
+  }
+
+  if (!order) {
+    return tg.sendMessage(chatId,
+      '❌ *Nomor pesanan tidak terbaca / tidak ketemu.*\nCoba kirim dengan caption `/kirim INV-xxxxxx`',
+      { ...MD, reply_to_message_id: msg.message_id });
+  }
+
+  // Update order: status dikirim + nomor resi (bila terbaca)
+  const patchData = { status: 'dikirim' };
+  if (info.resi) patchData.nomor_resi = info.resi;
+  await sbPatch('orders', { id: `eq.${order.id}` }, patchData).catch((e) => console.error('[ocr-resi] patch gagal:', e.message));
+
+  // Antrekan foto resi + notifikasi ke WA customer
+  const hari = getEstimasi(order.alamat_lengkap);
+  const pesanWA = `📦 *PESANAN DIKIRIM (${order.id})*\n\nHalo kak ${order.nama_penerima}! Paket sudah diserahkan ke kurir. 🚚\n${info.resi ? `*No. Resi:* ${info.resi}${info.resiKurir ? ` (${info.resiKurir})` : ''}\n` : ''}(Otomatis selesai dalam ${hari} hari)`;
+  if (order.nomor_wa) {
+    await queueWA(order.nomor_wa, 'image', fileUrl, pesanWA, fileUrl);
+  }
+  await logActivity('resi', `Resi ${order.id} terkirim via OCR otomatis. Resi: ${info.resi || '-'}. Estimasi ${hari} hari.`);
+
+  return tg.sendMessage(chatId,
+    `✅ *Resi terkirim ke ${order.nama_penerima} via WA.*\nStatus → Dikirim 🚚\n${info.resi ? `No. Resi: ${info.resi}` : ''}`,
+    { ...MD, reply_to_message_id: msg.message_id });
 }
 
 // ---------- Pintasan marketplace: !\n[resi]\n[wa] ----------

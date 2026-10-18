@@ -1,6 +1,7 @@
 'use strict';
 /**
- * GET /api/cron/hourly — jalan tiap jam (cron: 0 * * * *):
+ * GET /api/cron/hourly — jalan tiap hari 09:00 WIB (cron: 0 2 * * *).
+ * (Paket Hobby Vercel hanya boleh cron harian.)
  *  1) Auto-selesai: pesanan "dikirim" yang sudah melewati estimasi → "selesai".
  *  2) Follow-up 30 hari: promo ke customer lama (anti-dobel via followup_log).
  * Port dari interval bot lama. Auth: Authorization: Bearer CRON_SECRET.
@@ -45,6 +46,15 @@ module.exports = async (req, res) => {
     if (!authorized(req)) return res.status(401).send('unauthorized');
     const now = Date.now();
     const out = { autoSelesai: 0, followup: 0 };
+
+    // ---- 0) Bersihkan sesi basi >7 hari (bug #8; sesi basi antar-langkah
+    //         juga sudah diabaikan di getSession lib/customer.js) ----
+    {
+      const cutoff = new Date(now - 7 * 24 * 3600 * 1000).toISOString();
+      await fetch(`${SB_URL}/rest/v1/order_sessions?updated_at=lt.${encodeURIComponent(cutoff)}`, {
+        method: 'DELETE', headers: H,
+      }).catch(() => {});
+    }
 
     // ---- 1) Auto-selesai ----
     {
@@ -117,6 +127,40 @@ module.exports = async (req, res) => {
             { parse_mode: 'Markdown' }).catch(() => {});
         }
         out.followup++;
+      }
+    }
+
+    // ---- 3) FITUR JUALAN: Pengingat bayar otomatis ----
+    // Order pending > 3 jam & belum pernah diingatkan → kirim WA reminder
+    {
+      out.reminder = 0;
+      const tigaJamLalu = new Date(now - 3 * 3600 * 1000).toISOString();
+      const q3 = new URLSearchParams({
+        select: 'id,nama_penerima,nomor_wa,total_harga,tanggal', status: 'eq.pending',
+        tanggal: `lt.${tigaJamLalu}`, limit: '100', order: 'tanggal',
+      });
+      const r = await fetch(`${SB_URL}/rest/v1/orders?${q3}`, { headers: H });
+      const rows = r.ok ? await r.json() : [];
+      for (const o of rows) {
+        if (!o.nomor_wa) continue;
+        // Sudah pernah diingatkan? (cek reminder_sent_at)
+        const cek = await fetch(`${SB_URL}/rest/v1/orders?id=eq.${o.id}&select=reminder_sent_at`, { headers: H });
+        const cj = cek.ok ? await cek.json() : [];
+        if (cj[0] && cj[0].reminder_sent_at) continue;
+
+        const rpF = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
+        await queueWA(o.nomor_wa, 'text',
+          `⏰ *PENGINGAT PEMBAYARAN*\n\nHalo kak ${o.nama_penerima}! Pesanan *${o.id}* (${rpF(o.total_harga)}) belum dibayar nih.\n\nYuk selesaikan pembayaran agar pesanan segera diproses! 🙏\nBalas chat ini kalau ada kendala ya kak.`).catch(() => {});
+        await fetch(`${SB_URL}/rest/v1/orders?id=eq.${o.id}`, {
+          method: 'PATCH', headers: H,
+          body: JSON.stringify({ reminder_sent_at: new Date().toISOString() }),
+        }).catch(() => {});
+        out.reminder++;
+      }
+      if (out.reminder > 0 && OWNER_ID) {
+        await sendMessage(OWNER_ID,
+          `⏰ *${out.reminder} pengingat bayar* terkirim via WA.`,
+          { parse_mode: 'Markdown' }).catch(() => {});
       }
     }
 

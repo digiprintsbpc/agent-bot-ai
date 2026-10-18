@@ -40,4 +40,68 @@ function extractAmounts(text) {
   return [...new Set(nums)].sort((a, b) => b - a);
 }
 
-module.exports = { ocrImage, extractAmounts };
+/**
+ * Ekstrak info resi pengiriman dari teks OCR.
+ * Return: { inv, resi, resiKurir, penerima }
+ * - inv: nomor pesanan /INV-\d{6}/i
+ * - resi: nomor resi/awb terkuat
+ * - resiKurir: tebakan kurir (JNE/J&T/SiCepat/dll)
+ * - penerima: nama penerima (dekat kata "penerima"/"kepada"/"to")
+ */
+function extractResiInfo(text) {
+  const t = String(text || '');
+  const out = { inv: null, resi: null, resiKurir: null, penerima: null };
+
+  // 1) Nomor pesanan INV-xxxxxx
+  const invM = t.match(/INV-\d{6}/i);
+  if (invM) out.inv = invM[0].toUpperCase();
+
+  // 2) Nomor resi — cari kandidat per kurir, pilih yang paling kuat
+  const candidates = [];
+
+  // J&T Express: JD atau JP diikuti 8+ digit
+  let m;
+  const jtRe = /\b(JD|JP)\d{8,}\b/gi;
+  while ((m = jtRe.exec(t))) candidates.push({ resi: m[0].toUpperCase(), kurir: 'J&T', kuat: 3 });
+
+  // SiCepat: diawali 00 diikuti 8+ digit
+  const scRe = /\b00\d{8,}\b/g;
+  while ((m = scRe.exec(t))) candidates.push({ resi: m[0], kurir: 'SiCepat', kuat: 3 });
+
+  // JNE & umum: 10-15 digit angka (hindari nomor HP: jangan diawali 08/628)
+  const jneRe = /\b(?!(?:08|628))\d{10,15}\b/g;
+  while ((m = jneRe.exec(t))) {
+    // skip kalau terlihat seperti nominal harga (didahului Rp)
+    const before = t.slice(Math.max(0, m.index - 5), m.index);
+    if (/rp\.?\s?$/i.test(before)) continue;
+    candidates.push({ resi: m[0], kurir: 'JNE', kuat: 2 });
+  }
+
+  // Cari di dekat kata kunci resi/AWB/tracking → naikkan kekuatan
+  const keywordRe = /(resi|awb|tracking|no\.?\s*resi|nomor\s*resi)[\s:]*([A-Z0-9]{8,20})/gi;
+  while ((m = keywordRe.exec(t))) {
+    const val = m[2].toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (val.length >= 8) {
+      const existing = candidates.find((c) => c.resi === val);
+      if (existing) existing.kuat += 2;
+      else candidates.push({ resi: val, kurir: null, kuat: 2 });
+    }
+  }
+
+  if (candidates.length) {
+    candidates.sort((a, b) => b.kuat - a.kuat);
+    out.resi = candidates[0].resi;
+    out.resiKurir = candidates[0].kurir;
+  }
+
+  // 3) Nama penerima — cari di dekat kata kunci
+  const penerimaRe = /(?:penerima|kepada|to|nama\s*penerima)[\s:]+([A-Za-z\s.'-]{3,40})/i;
+  const pm = t.match(penerimaRe);
+  if (pm) {
+    out.penerima = pm[1].trim().replace(/\s+/g, ' ').slice(0, 40);
+  }
+
+  return out;
+}
+
+module.exports = { ocrImage, extractAmounts, extractResiInfo };
