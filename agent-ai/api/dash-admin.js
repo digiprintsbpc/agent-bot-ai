@@ -184,6 +184,28 @@ module.exports = async (req, res) => {
           order_id: orderId, product_id: prods[0].id, nama_produk: prods[0].nama,
           qty: q, harga_satuan: Number(prods[0].harga),
         }]);
+        // Notifikasi: WA ke customer (tagihan) + Telegram ke owner
+        try {
+          const rpF = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
+          if (cWa.length >= 10) {
+            await sbPost('wa_outbox', [{
+              to_wa: cWa, kind: 'text', status: 'pending',
+              content: `🧾 *PESANAN BARU (${orderId})*\n\nHalo kak ${nama}! Terima kasih sudah order di Digiprint.\n\n📦 ${prods[0].nama}\nJumlah: ${q}\n*Total: ${rpF(total)}*\n\nSilakan lakukan pembayaran. Kirim bukti transfer ke sini ya kak 🙏`,
+            }]);
+          }
+          const ownerId = process.env.TELEGRAM_ALLOWED_ID || '';
+          const botTok = process.env.TELEGRAM_BOT_TOKEN || '';
+          if (ownerId && botTok) {
+            await fetch(`https://api.telegram.org/bot${botTok}/sendMessage`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: ownerId,
+                text: `🛍️ *ORDER BARU (Dashboard)*\n\nID: ${orderId}\nCustomer: ${nama} (${cWa})\nProduk: ${prods[0].nama} x${q}\nTotal: ${rpF(total)}`,
+                parse_mode: 'Markdown',
+              }),
+            }).catch(() => {});
+          }
+        } catch (e) { console.error('[dash] notif gagal:', e.message); }
         return res.status(200).json({ ok: true, id: orderId, total });
       }
 
@@ -192,6 +214,19 @@ module.exports = async (req, res) => {
         const status = String(b.status || '');
         if (!STATUS_OK.includes(status)) return res.status(400).json({ ok: false, error: 'Status tidak valid' });
         await sbPatch('orders', { id: `eq.${id}` }, { status });
+        // Notifikasi WA ke customer saat status berubah
+        try {
+          const ords = await sbGet('orders', { select: 'nama_penerima,nomor_wa,nomor_resi', id: `eq.${id}`, limit: 1 });
+          const o = ords[0];
+          const cWa = String(o?.nomor_wa || '').replace(/\D/g, '');
+          const statusLabel = { pending: 'Menunggu Pembayaran ⏳', diproses: 'Diproses ⚙️', dikirim: 'Dikirim 🚚', selesai: 'Selesai ✅', batal: 'Dibatalkan ❌' };
+          if (cWa.length >= 10 && statusLabel[status]) {
+            let msg = `📦 *UPDATE PESANAN (${id})*\n\nHalo kak ${o.nama_penerima}! Status pesanan kakak: *${statusLabel[status]}*`;
+            if (status === 'dikirim' && o.nomor_resi) msg += `\n\nNo. Resi: ${o.nomor_resi}`;
+            if (status === 'selesai') msg += `\n\nTerima kasih sudah order di Digiprint! 🙏`;
+            await sbPost('wa_outbox', [{ to_wa: cWa, kind: 'text', status: 'pending', content: msg }]);
+          }
+        } catch (e) { console.error('[dash] notif status gagal:', e.message); }
         return res.status(200).json({ ok: true });
       }
 

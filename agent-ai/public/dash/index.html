@@ -228,15 +228,23 @@ async function loadDash() {
     options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } },
       scales:{ y:{ ticks:{ callback:v => (v/1000)+'rb' } } } } });
   document.getElementById('orderRows').innerHTML = d.orders.map(o => `
-    <tr class="border-b last:border-0"><td class="py-2 pr-2 font-mono text-xs">${o.id}</td>
+    <tr class="border-b last:border-0 hover:bg-indigo-50 cursor-pointer" onclick="goToOrder('${o.id}')"><td class="py-2 pr-2 font-mono text-xs">${o.id}</td>
     <td class="pr-2">${esc(o.nama)}</td><td class="pr-2">${rp(o.total)}</td>
     <td><span class="status-${o.status} text-xs px-2 py-0.5 rounded-full">${STATUS_LABEL[o.status]||o.status}</span></td></tr>`).join('')
     || '<tr><td colspan="4" class="py-3 text-center text-slate-400">Belum ada order</td></tr>';
   document.getElementById('prodRows').innerHTML = d.products.map(p => `
-    <tr class="border-b last:border-0"><td class="py-2 pr-2">${esc(p.nama)}</td>
+    <tr class="border-b last:border-0 hover:bg-indigo-50 cursor-pointer" onclick="goToProduk()"><td class="py-2 pr-2">${esc(p.nama)}</td>
     <td class="pr-2">${rp(p.harga)}</td>
     <td class="${p.stok < 10 ? 'stok-rendah' : ''}">${p.stok}${p.stok < 10 ? ' ⚠️' : ''}</td></tr>`).join('');
 }
+
+/* Navigasi dari dashboard */
+function goToOrder(id) {
+  showTab('order');
+  const s = document.getElementById('koSearch');
+  if (s) { s.value = id; loadKelolaOrder(); }
+}
+function goToProduk() { showTab('produk'); }
 
 /* ---------- TAB 2: buat pesanan ---------- */
 async function loadProdukDropdown() {
