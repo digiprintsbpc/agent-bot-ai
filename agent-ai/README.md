@@ -84,3 +84,12 @@ Buka `https://PROJECT.vercel.app/dashboard.html` untuk melihat aktivitas agent.
 Frontend kantor 3D di `public/kerja/` diadaptasi dari
 [humaedihume/kantor-agent](https://github.com/humaedihume/kantor-agent) (MIT),
 termasuk three.js (MIT). Buka di `/kerja/`.
+
+## Mode pelanggan (order via chat)
+Chat selain `TELEGRAM_ALLOWED_ID` otomatis masuk mode pelanggan: pesan barang
+natural → konfirmasi → order masuk database → QRIS PayinAja dikirim sebagai
+foto → "SUDAH BAYAR" untuk verifikasi → status jadi `diproses` + owner
+dapat notifikasi. Perlu:
+- Env `PAYINAJA_API_KEY` (copy dari config.js bot toko)
+- Migrasi `supabase-migrasi-order-sessions.sql` (tabel `order_sessions` +
+  kolom `orders.payment_trx_id`)
