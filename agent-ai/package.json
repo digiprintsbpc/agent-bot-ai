@@ -1,0 +1,7 @@
+{
+  "name": "agent-ai",
+  "version": "1.0.0",
+  "description": "AI agent pribadi di Vercel: webhook Telegram + failover Groq/NVIDIA + memory Supabase + skill toko",
+  "engines": { "node": ">=20" },
+  "dependencies": {}
+}
