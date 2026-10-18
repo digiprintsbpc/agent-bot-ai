@@ -1,8 +1,26 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/briefing",
+      "schedule": "0 0 * * *"
+    }
+  ],
   "functions": {
-    "api/telegram.js": { "maxDuration": 60 },
-    "api/activity.js": { "maxDuration": 10 },
-    "api/kantor-state.js": { "maxDuration": 10 }
+    "api/activity.js": {
+      "maxDuration": 10
+    },
+    "api/briefing.js": {
+      "maxDuration": 30
+    },
+    "api/kantor-state.js": {
+      "maxDuration": 10
+    },
+    "api/telegram.js": {
+      "maxDuration": 60
+    },
+    "api/wa.js": {
+      "maxDuration": 60
+    }
   }
 }

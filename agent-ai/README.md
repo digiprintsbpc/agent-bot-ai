@@ -93,3 +93,10 @@ dapat notifikasi. Perlu:
 - Env `PAYINAJA_API_KEY` (copy dari config.js bot toko)
 - Migrasi `supabase-migrasi-order-sessions.sql` (tabel `order_sessions` +
   kolom `orders.payment_trx_id`)
+
+## Briefing pagi otomatis
+Vercel Cron memanggil `/api/briefing` tiap **07:00 WIB** (jadwal
+`0 0 * * *` UTC di `vercel.json`): ringkasan order kemarin + omset, daftar
+belum bayar untuk follow-up, dan pesanan yang sedang berjalan — dikirim ke
+Telegram owner. Tanpa LLM (tidak makan kuota AI). Tes manual:
+isi env `CRON_SECRET`, lalu buka `/api/briefing?token=<redacted>

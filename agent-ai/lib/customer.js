@@ -178,7 +178,9 @@ function orderSummary(d) {
 }
 
 // ---------- Handler utama ----------
-async function handleCustomer(userId, text) {
+// onPhoto(url, caption): bila diisi, foto QRIS diserahkan ke pemanggil
+// (dipakai channel WA); bila kosong, dikirim via Telegram dan return null.
+async function handleCustomer(userId, text, onPhoto) {
   const q = String(text || '').trim();
   let session = await getSession(userId);
   if (!session) session = { user_id: String(userId), step: 'idle', draft: {} };
@@ -241,8 +243,12 @@ async function handleCustomer(userId, text) {
             `🛒 *PESANAN BARU* (via Agent)\nInvoice: ${r.orderId}\n${d.product_nama} × ${d.qty} = ${rp(r.total)}\nPelanggan: ${d.name} (${d.phone})\nStatus: Belum Bayar 🔴`).catch(() => {});
         }
         if (r.qrUrl) {
-          await sendPhoto(userId, r.qrUrl,
-            `🧾 *Pesanan ${r.orderId}*\n${d.product_nama} × ${d.qty}\n*Total: ${rp(r.total)}*\n\nSilakan scan QRIS di atas untuk membayar. Setelah bayar, ketik *SUDAH BAYAR*.`);
+          const caption = `🧾 *Pesanan ${r.orderId}*\n${d.product_nama} × ${d.qty}\n*Total: ${rp(r.total)}*\n\nSilakan scan QRIS di atas untuk membayar. Setelah bayar, ketik *SUDAH BAYAR*.`;
+          if (onPhoto) {
+            await onPhoto(r.qrUrl, caption);
+            return null; // pemanggil (WA) yang mengirim fotonya
+          }
+          await sendPhoto(userId, r.qrUrl, caption);
           return null; // foto sudah terkirim sebagai balasan
         }
         return `Pesanan *${r.orderId}* dibuat, tapi QRIS gagal: ${r.qrisError || 'unknown'}. Admin akan hubungi kakak ya.`;
