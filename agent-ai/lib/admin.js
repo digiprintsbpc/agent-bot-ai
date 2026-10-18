@@ -785,8 +785,22 @@ async function handleInvoice(chatId, orderId) {
       select: 'nama_produk,qty,harga_satuan', order_id: `eq.${orderId}`,
     }).catch(() => []);
     const pdfBuffer = await generateInvoice({ ...orders[0], items });
-    await tg.sendDocument(chatId, pdfBuffer, `Invoice-${orderId}.pdf`,
-      `🧾 *Invoice ${orderId}*\nTotal: ${rp(orders[0].total_harga)}`);
+
+    // Upload ke Storage untuk dapat link publik
+    let publicUrl = null;
+    try {
+      const fileName = `Invoice-${orderId}-${Date.now()}.pdf`;
+      const upRes = await fetch(`${SB_URL}/storage/v1/object/invoices/${fileName}`, {
+        method: 'POST',
+        headers: { ...sbHeaders(), 'Content-Type': 'application/pdf' },
+        body: pdfBuffer,
+      });
+      if (upRes.ok) publicUrl = `${SB_URL}/storage/v1/object/public/invoices/${fileName}`;
+    } catch (e) { console.error('[invoice] upload gagal:', e.message); }
+
+    const caption = `🧾 *Invoice ${orderId}*\nTotal: ${rp(orders[0].total_harga)}` +
+      (publicUrl ? `\n\n🔗 *Link publik (forward ke customer):*\n${publicUrl}` : '');
+    await tg.sendDocument(chatId, pdfBuffer, `Invoice-${orderId}.pdf`, caption);
     await tg.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
     await logActivity('invoice', `Invoice ${orderId} dibuat & dikirim ke admin.`);
   } catch (e) {
@@ -915,6 +929,23 @@ async function handleFotoOtomatis(chatId, msg, captionText) {
     const rows = await sbGet('orders', { select: 'id,nama_penerima,nomor_wa,alamat_lengkap,status', order: 'tanggal.desc', limit: 50 }).catch(() => []);
     const key = info.penerima.toLowerCase().slice(0, 5);
     order = rows.find((r) => String(r.nama_penerima || '').toLowerCase().includes(key));
+  }
+  if (!order) {
+    // Fallback: cocokkan SEMUA angka di gambar dengan database (ID order, no WA, dll)
+    const { extractAllNumbers } = require('./ocr');
+    const nums = extractAllNumbers(ocr.text);
+    if (nums.length) {
+      const rows = await sbGet('orders', { select: 'id,nama_penerima,nomor_wa,alamat_lengkap,status', order: 'tanggal.desc', limit: 100 }).catch(() => []);
+      for (const num of nums) {
+        // Cek: cocok dengan bagian ID order (INV-xxxxxx → xxxxxx)
+        order = rows.find((r) => String(r.id || '').replace(/\D/g, '').includes(num) || num.includes(String(r.id || '').replace(/\D/g, '')));
+        if (order) { console.log('[ocr-resi] cocok via ID:', num); break; }
+        // Cek: cocok dengan nomor WA (6+ digit terakhir)
+        const waDigits = (s) => String(s || '').replace(/\D/g, '').slice(-10);
+        order = rows.find((r) => { const w = waDigits(r.nomor_wa); return w.length >= 6 && (w.includes(num.slice(-10)) || num.slice(-10).includes(w)); });
+        if (order) { console.log('[ocr-resi] cocok via WA:', num); break; }
+      }
+    }
   }
 
   if (!order) {
