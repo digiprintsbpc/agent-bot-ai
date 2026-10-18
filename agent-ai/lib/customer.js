@@ -120,18 +120,18 @@ DAFTAR PRODUK (id | nama | harga):
 ${products.map((p) => `${p.id} | ${p.nama} | ${rp(p.harga)}`).join('\n')}
 
 STATUS: step=${step}
-SUDAH TERKUMPUL: produk=${d.product_nama || '-'} qty=${d.qty || '-'} nama=${d.name || '-'} wa=${d.phone || '-'} alamat=${d.address || '-'}
+SUDAH TERKUMPUL: produk=${d.product_nama || d.product_hint || '-'} qty=${d.qty || '-'} nama=${d.name || '-'} wa=${d.phone || '-'} alamat=${d.address || '-'}
 MASIH KURANG: ${missing.join(', ') || 'lengkap'}
 
 ATURAN:
-- Cocokkan produk yang dimaksud ke salah satu ID (fuzzy: "nota setengah folio 2 ply" → produk nota 1/2 folio 2ply). Kalau tidak jelas → product_id null.
+- Cocokkan produk yang dimaksud ke salah satu ID (fuzzy: "nota setengah folio 2 ply" → produk nota 1/2 folio 2ply). Kalau tipe produk jelas tapi varian belum (mis. "1/4 2ply" bisa 50 atau 100 lembar) → product_id null TAPI isi product_hint dengan tipe-nya ("1/4 2ply"). Kalau tidak jelas sama sekali → keduanya null.
 - qty: angka jumlah. null bila tidak disebut.
 - intent: order (mau pesan), ask (tanya produk/harga), track (tanya status pesanan / menyebut INV-), paid (bilang sudah bayar/lunas), cancel (batal), greeting (salam), other.
 - confirmed: true bila pelanggan menyetujui ("ya", "oke", "setuju"), false bila menolak ("tidak", "batal"), null bila tidak ada.
 - reply: balasan natural 1-3 kalimat. Bila masih ada yang kurang dan step collecting/idle, tanyakan SATU hal yang paling penting berikutnya. Jangan mengarang harga.
 
 Balas HANYA JSON valid:
-{"intent":"order","product_id":null,"qty":null,"name":null,"phone":null,"address":null,"confirmed":null,"reply":"..."}
+{"intent":"order","product_id":null,"product_hint":null,"qty":null,"name":null,"phone":null,"address":null,"confirmed":null,"reply":"..."}
 
 PESAN PELANGGAN: """${text}"""`;
 
@@ -348,8 +348,9 @@ async function handleCustomer(userId, text, onPhoto) {
   // Terapkan slot ke draft
   if (p.product_id) {
     const prod = products.find((x) => x.id === p.product_id);
-    if (prod) { d.product_id = prod.id; d.product_nama = prod.nama; d.harga = Number(prod.harga); }
+    if (prod) { d.product_id = prod.id; d.product_nama = prod.nama; d.harga = Number(prod.harga); d.product_hint = null; }
   }
+  if (p.product_hint && !d.product_id) d.product_hint = String(p.product_hint).slice(0, 60);
   if (p.qty && Number(p.qty) > 0) d.qty = Math.floor(Number(p.qty));
   if (p.name) d.name = String(p.name).slice(0, 80);
   if (p.phone) d.phone = String(p.phone).replace(/\D/g, '').slice(0, 16);
@@ -378,8 +379,15 @@ async function handleCustomer(userId, text, onPhoto) {
 
   await saveSession(userId, 'collecting', d);
   // Pakai balasan LLM bila sudah menanyakan hal yang kurang; kalau tidak, fallback template
-  const needWord = { produk: 'produk', jumlah: 'jumlah', nama: 'nama', 'no WA': 'WA', alamat: 'alamat' };
-  const asksMissing = missing.some((m) => (p.reply || '').toLowerCase().includes(needWord[m].toLowerCase()));
+  const needWords = {
+    produk: ['produk', 'paket', 'nota', 'kwitansi', 'barang'],
+    jumlah: ['jumlah', 'lembar', 'berapa', 'banyak'],
+    nama: ['nama'],
+    'no WA': ['wa', 'nomor', 'telepon', 'hp'],
+    alamat: ['alamat', 'kirim', 'lokasi']
+  };
+  const replyLower = (p.reply || '').toLowerCase();
+  const asksMissing = missing.some((m) => (needWords[m] || [m]).some((w) => replyLower.includes(w)));
   if (p.reply && (asksMissing || p.intent === 'ask' || p.intent === 'greeting' || p.intent === 'other')) {
     // Katalog HANYA bila diminta eksplisit, atau saat mau pesan tapi produknya belum jelas.
     // Selain itu (mis. tanya ukuran, tanya harga satuan) → jawab saja, tanpa katalog.
