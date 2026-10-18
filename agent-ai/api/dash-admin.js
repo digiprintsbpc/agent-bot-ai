@@ -184,14 +184,27 @@ module.exports = async (req, res) => {
           order_id: orderId, product_id: prods[0].id, nama_produk: prods[0].nama,
           qty: q, harga_satuan: Number(prods[0].harga),
         }]);
-        // Notifikasi: WA ke customer (tagihan) + Telegram ke owner
+        // Notifikasi: WA ke customer (tagihan + QRIS) + Telegram ke owner
         try {
           const rpF = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
+          // Generate QRIS
+          let qrUrl = null;
+          try {
+            const payinaja = require('./payinaja');
+            const qris = await payinaja.createQRIS(total, orderId, String(nama || '-'), cWa);
+            if (qris.ok) {
+              qrUrl = qris.qr_image_url;
+              await sbPatch('orders', { id: `eq.${orderId}` }, { payment_trx_id: qris.trx_id }).catch(() => {});
+            }
+          } catch (e) { console.error('[dash] QRIS gagal:', e.message); }
           if (cWa.length >= 10) {
-            await sbPost('wa_outbox', [{
-              to_wa: cWa, kind: 'text', status: 'pending',
-              content: `🧾 *PESANAN BARU (${orderId})*\n\nHalo kak ${nama}! Terima kasih sudah order di Digiprint.\n\n📦 ${prods[0].nama}\nJumlah: ${q}\n*Total: ${rpF(total)}*\n\nSilakan lakukan pembayaran. Kirim bukti transfer ke sini ya kak 🙏`,
-            }]);
+            const tagihan = `🧾 *PESANAN BARU (${orderId})*\n\nHalo kak ${nama}! Terima kasih sudah order di Digiprint.\n\n📦 ${prods[0].nama}\nJumlah: ${q}\n*Total: ${rpF(total)}*\n\n${qrUrl ? 'Silakan scan QRIS di bawah untuk bayar 👇' : 'Silakan lakukan pembayaran. Kirim bukti transfer ke sini ya kak 🙏'}`;
+            if (qrUrl) {
+              // Kirim gambar QRIS + teks tagihan
+              await sbPost('wa_outbox', [{ to_wa: cWa, kind: 'image', status: 'pending', content: qrUrl, caption: tagihan, image_url: qrUrl }]);
+            } else {
+              await sbPost('wa_outbox', [{ to_wa: cWa, kind: 'text', status: 'pending', content: tagihan }]);
+            }
           }
           const ownerId = process.env.TELEGRAM_ALLOWED_ID || '';
           const botTok = process.env.TELEGRAM_BOT_TOKEN || '';

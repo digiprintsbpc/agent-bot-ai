@@ -492,6 +492,29 @@ async function handleCustomer(userId, text, onPhoto) {
     return 'Baik kak, dibatalkan. Chat lagi aja kalau butuh 😊';
   }
   if (p.intent === 'paid') {
+    // Cari order pending by WA (untuk order dari dashboard tanpa sesi)
+    try {
+      const waDigits = String(userId).replace('wa:', '').replace(/\D/g, '');
+      const orders = await sbGet('orders', { select: 'id,total_harga,payment_trx_id,nama_penerima', status: 'eq.pending', order: 'tanggal.desc', limit: 5 }).catch(() => []);
+      const mine = orders.find(o => String(o.nomor_wa || '').replace(/\D/g, '').slice(-10) === waDigits.slice(-10));
+      // Fallback: cari by nomor_wa langsung jika field tersedia
+      let target = mine;
+      if (!target) {
+        const byWa = await sbGet('orders', { select: 'id,total_harga,payment_trx_id,nama_penerima,nomor_wa', status: 'eq.pending', order: 'tanggal.desc', limit: 20 }).catch(() => []);
+        target = byWa.find(o => String(o.nomor_wa || '').replace(/\D/g, '').slice(-10) === waDigits.slice(-10));
+      }
+      if (target && target.payment_trx_id) {
+        const payinaja = require('./payinaja');
+        const cek = await payinaja.checkTransaction(target.payment_trx_id).catch(() => ({ ok: false }));
+        if (cek.ok && cek.paid) {
+          // Buat sesi sementara dan proses seperti pembayaran biasa
+          const { generateInvoice } = require('./invoice');
+          await sbPatch('orders', { id: `eq.${target.id}` }, { status: 'diproses' }).catch(() => {});
+          return `Pembayaran terkonfirmasi kak! ✅\nPesanan ${target.id} sedang diproses. Invoice akan dikirim ke WA kakak 🙏`;
+        }
+        return `Belum terdeteksi pembayarannya kak. Kalau sudah scan QRIS, tunggu sebentar ya, atau kirim bukti transfer di sini 🙏`;
+      }
+    } catch (e) { console.error('[paid] cek gagal:', e.message); }
     return 'Kakak belum punya pesanan aktif. Mau buat pesanan dulu?';
   }
 
