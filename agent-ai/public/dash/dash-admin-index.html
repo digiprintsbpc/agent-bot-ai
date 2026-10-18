@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🛠️ Admin Toko — Digiprint</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  .status-pending { background:#fef3c7; color:#92400e; }
+  .status-diproses { background:#dbeafe; color:#1e40af; }
+  .status-dikirim { background:#e0e7ff; color:#3730a3; }
+  .status-selesai { background:#d1fae5; color:#065f46; }
+  .status-batal { background:#fee2e2; color:#991b1b; }
+  .stok-rendah { color:#dc2626; font-weight:700; }
+  .tab-btn { padding:.6rem .25rem; font-size:.8rem; font-weight:600; color:#64748b; border-bottom:3px solid transparent; white-space:nowrap; }
+  .tab-btn.active { color:#4f46e5; border-bottom-color:#4f46e5; }
+  .inp { width:100%; border:1px solid #e2e8f0; border-radius:.65rem; padding:.6rem .8rem; font-size:.9rem; }
+  .inp:focus { outline:none; border-color:#4f46e5; box-shadow:0 0 0 2px rgba(79,70,229,.15); }
+  .btn-primary { background:#4f46e5; color:#fff; border-radius:.65rem; padding:.65rem 1rem; font-weight:600; font-size:.9rem; }
+  .btn-primary:hover { background:#4338ca; }
+  .btn-danger { background:#fee2e2; color:#991b1b; border-radius:.5rem; padding:.3rem .7rem; font-size:.75rem; font-weight:600; }
+  .card { background:#fff; border-radius:.9rem; box-shadow:0 1px 3px rgba(0,0,0,.08); padding:1rem; }
+</style>
+</head>
+<body class="bg-slate-100 min-h-screen">
+
+<!-- ===== LOGIN ===== -->
+<div id="login" class="min-h-screen flex items-center justify-center p-4">
+  <div class="bg-white rounded-2xl shadow-lg p-8 w-full max-w-sm">
+    <h1 class="text-2xl font-bold text-center mb-1">🛠️ Admin Toko</h1>
+    <p class="text-slate-500 text-center text-sm mb-6">Digiprint — masukkan PIN</p>
+    <input id="pinInput" type="password" inputmode="numeric" placeholder="PIN"
+      class="w-full border rounded-xl px-4 py-3 text-center text-xl tracking-widest mb-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    <button id="loginBtn" class="w-full bg-indigo-600 text-white rounded-xl py-3 font-semibold hover:bg-indigo-700">Masuk</button>
+    <p id="loginErr" class="text-red-600 text-sm text-center mt-3 hidden">PIN salah, coba lagi.</p>
+  </div>
+</div>
+
+<!-- ===== APP ===== -->
+<div id="app" class="hidden max-w-6xl mx-auto pb-16">
+  <!-- Header + tab -->
+  <div class="bg-white shadow-sm sticky top-0 z-10">
+    <div class="max-w-6xl mx-auto px-4 pt-3">
+      <div class="flex items-center justify-between mb-1">
+        <h1 class="text-lg font-bold">🛠️ Admin Toko</h1>
+        <button id="logoutBtn" class="text-xs text-slate-500 border rounded-lg px-2 py-1">Keluar</button>
+      </div>
+      <nav class="flex gap-4 overflow-x-auto" id="tabs">
+        <button class="tab-btn active" data-tab="dash">📊 Dashboard</button>
+        <button class="tab-btn" data-tab="order-baru">🛒 Buat Pesanan</button>
+        <button class="tab-btn" data-tab="orders">📋 Kelola Order</button>
+        <button class="tab-btn" data-tab="produk">📦 Produk</button>
+        <button class="tab-btn" data-tab="keuangan">💸 Keuangan</button>
+      </nav>
+    </div>
+  </div>
+
+  <div class="p-4">
+    <!-- ============ TAB 1: DASHBOARD ============ -->
+    <section id="tab-dash">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div class="card"><p class="text-xs text-slate-500">Omset Hari Ini</p><p id="omHari" class="text-lg font-bold text-indigo-700">–</p></div>
+        <div class="card"><p class="text-xs text-slate-500">Omset 7 Hari</p><p id="omMinggu" class="text-lg font-bold text-indigo-700">–</p></div>
+        <div class="card"><p class="text-xs text-slate-500">Omset Bulan Ini</p><p id="omBulan" class="text-lg font-bold text-indigo-700">–</p></div>
+        <div class="card"><p class="text-xs text-slate-500">Total Order (30 hr)</p><p id="totOrder" class="text-lg font-bold text-indigo-700">–</p></div>
+      </div>
+      <div class="card mb-4">
+        <h2 class="font-semibold mb-2">📈 Penjualan 7 Hari Terakhir</h2>
+        <div class="h-56"><canvas id="chartOmset"></canvas></div>
+      </div>
+      <div class="card mb-4 overflow-x-auto">
+        <h2 class="font-semibold mb-2">🧾 10 Order Terbaru</h2>
+        <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+          <th class="py-2 pr-2">ID</th><th class="pr-2">Nama</th><th class="pr-2">Total</th><th>Status</th>
+        </tr></thead><tbody id="orderRows"></tbody></table>
+      </div>
+      <div class="card overflow-x-auto">
+        <h2 class="font-semibold mb-2">📦 Produk & Stok</h2>
+        <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+          <th class="py-2 pr-2">Produk</th><th class="pr-2">Harga</th><th>Stok</th>
+        </tr></thead><tbody id="prodRows"></tbody></table>
+      </div>
+    </section>
+
+    <!-- ============ TAB 2: BUAT PESANAN ============ -->
+    <section id="tab-order-baru" class="hidden">
+      <div class="card max-w-lg">
+        <h2 class="font-semibold mb-3">🛒 Buat Pesanan Baru</h2>
+        <label class="text-xs text-slate-500">Produk</label>
+        <select id="obProduk" class="inp mb-3"></select>
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div><label class="text-xs text-slate-500">Qty</label><input id="obQty" type="number" min="1" value="1" class="inp"></div>
+          <div><label class="text-xs text-slate-500">Total</label><input id="obTotal" class="inp bg-slate-50" readonly></div>
+        </div>
+        <label class="text-xs text-slate-500">Nama penerima</label><input id="obNama" class="inp mb-3" placeholder="Nama customer">
+        <label class="text-xs text-slate-500">No. WA</label><input id="obWa" class="inp mb-3" inputmode="numeric" placeholder="08xxxxxxxxxx">
+        <label class="text-xs text-slate-500">Alamat</label><textarea id="obAlamat" class="inp mb-4" rows="2" placeholder="Alamat lengkap"></textarea>
+        <button id="obSubmit" class="btn-primary w-full">Buat Pesanan</button>
+        <p id="obResult" class="text-sm mt-3 hidden"></p>
+      </div>
+    </section>
+
+    <!-- ============ TAB 3: KELOLA ORDER ============ -->
+    <section id="tab-orders" class="hidden">
+      <div class="card mb-3">
+        <div class="flex gap-2 flex-wrap">
+          <select id="ordStatus" class="inp !w-auto text-sm">
+            <option value="">Semua status</option>
+            <option value="pending">Belum Bayar</option>
+            <option value="diproses">Diproses</option>
+            <option value="dikirim">Dikirim</option>
+            <option value="selesai">Selesai</option>
+            <option value="batal">Batal</option>
+          </select>
+          <input id="ordSearch" class="inp !w-auto flex-1 text-sm" placeholder="Cari INV / nama...">
+          <button id="ordCari" class="btn-primary !py-2">Cari</button>
+        </div>
+      </div>
+      <div class="card overflow-x-auto">
+        <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+          <th class="py-2 pr-2">ID</th><th class="pr-2">Nama</th><th class="pr-2">Total</th><th class="pr-2">Status</th><th>Aksi</th>
+        </tr></thead><tbody id="ordRows"></tbody></table>
+      </div>
+      <div id="ordDetail" class="card mt-3 hidden"></div>
+    </section>
+
+    <!-- ============ TAB 4: PRODUK ============ -->
+    <section id="tab-produk" class="hidden">
+      <div class="card mb-3">
+        <h2 class="font-semibold mb-2">➕ Tambah Produk</h2>
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
+          <input id="prNama" class="inp text-sm" placeholder="Nama produk">
+          <input id="prKategori" class="inp text-sm" placeholder="Kategori">
+          <input id="prHarga" type="number" class="inp text-sm" placeholder="Harga">
+          <input id="prStok" type="number" class="inp text-sm" placeholder="Stok">
+          <button id="prAdd" class="btn-primary !py-2 text-sm">Tambah</button>
+        </div>
+      </div>
+      <div class="card overflow-x-auto">
+        <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+          <th class="py-2 pr-2">Produk</th><th class="pr-2">Kategori</th><th class="pr-2">Harga</th><th class="pr-2">Stok</th><th>Aksi</th>
+        </tr></thead><tbody id="prRows"></tbody></table>
+      </div>
+    </section>
+
+    <!-- ============ TAB 5: KEUANGAN ============ -->
+    <section id="tab-keuangan" class="hidden">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div class="card"><p class="text-xs text-slate-500">Omset Hari Ini</p><p id="kOmHari" class="text-lg font-bold text-indigo-700">–</p></div>
+        <div class="card"><p class="text-xs text-slate-500">Keluar Hari Ini</p><p id="kKelHari" class="text-lg font-bold text-red-600">–</p></div>
+        <div class="card"><p class="text-xs text-slate-500">Omset 30 Hari</p><p id="kOmBulan" class="text-lg font-bold text-indigo-700">–</p></div>
+        <div class="card"><p class="text-xs text-slate-500">Profit 30 Hari</p><p id="kProfit" class="text-lg font-bold text-green-700">–</p></div>
+      </div>
+      <div class="card mb-4 max-w-lg">
+        <h2 class="font-semibold mb-2">➕ Catat Pengeluaran</h2>
+        <div class="flex gap-2">
+          <input id="kgNominal" type="number" class="inp text-sm" placeholder="Nominal (Rp)">
+          <input id="kgKet" class="inp text-sm flex-1" placeholder="Keterangan">
+          <button id="kgAdd" class="btn-primary !py-2 text-sm">Simpan</button>
+        </div>
+      </div>
+      <div class="card overflow-x-auto">
+        <h2 class="font-semibold mb-2">💸 Riwayat Pengeluaran</h2>
+        <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+          <th class="py-2 pr-2">Tanggal</th><th class="pr-2">Keterangan</th><th class="pr-2">Nominal</th><th></th>
+        </tr></thead><tbody id="kgRows"></tbody></table>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+const rp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
+let PIN = sessionStorage.getItem('dash_pin') || '';
+let chart = null;
+let PRODUCTS = [];
+const STATUS_LABEL = { pending:'Belum Bayar', diproses:'Diproses', dikirim:'Dikirim', selesai:'Selesai', batal:'Batal' };
+const esc = (s) => String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const api = (path, opt) => fetch(path + (path.includes('?') ? '&' : '?') + 'pin=' + encodeURIComponent(PIN), opt);
+const fmtTgl = (iso) => { try { return new Date(iso).toLocaleDateString('id-ID', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit', timeZone:'Asia/Jakarta' }); } catch { return '-'; } };
+
+/* ---------- auth ---------- */
+document.getElementById('loginBtn').onclick = tryLogin;
+document.getElementById('pinInput').addEventListener('keydown', e => { if (e.key === 'Enter') tryLogin(); });
+async function tryLogin() {
+  PIN = document.getElementById('pinInput').value.trim();
+  document.getElementById('loginErr').classList.add('hidden');
+  const r = await fetch('/api/dash-data?pin=' + encodeURIComponent(PIN));
+  if (r.status === 401) { showLogin(true); return; }
+  sessionStorage.setItem('dash_pin', PIN);
+  showLogin(false); boot();
+}
+function showLogin(bad) {
+  document.getElementById('login').classList.toggle('hidden', !bad && !!PIN);
+  document.getElementById('app').classList.toggle('hidden', bad || !PIN);
+  if (bad) document.getElementById('loginErr').classList.remove('hidden');
+}
+document.getElementById('logoutBtn').onclick = () => { sessionStorage.removeItem('dash_pin'); PIN=''; showLogin(false); };
+
+/* ---------- tabs ---------- */
+document.querySelectorAll('#tabs .tab-btn').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#tabs .tab-btn').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  ['dash','order-baru','orders','produk','keuangan'].forEach(t =>
+    document.getElementById('tab-' + t).classList.toggle('hidden', t !== b.dataset.tab));
+  if (b.dataset.tab === 'orders') loadOrders();
+  if (b.dataset.tab === 'produk') loadProduk();
+  if (b.dataset.tab === 'keuangan') loadKeuangan();
+  if (b.dataset.tab === 'order-baru') loadProdukDropdown();
+  window.scrollTo(0, 0);
+});
+
+/* ---------- TAB 1: dashboard ---------- */
+async function loadDash() {
+  const r = await api('/api/dash-data');
+  if (r.status === 401) { showLogin(true); return; }
+  const d = await r.json();
+  if (!d.ok) { alert('Gagal: ' + d.error); return; }
+  document.getElementById('omHari').textContent = rp(d.omset.hariIni);
+  document.getElementById('omMinggu').textContent = rp(d.omset.mingguIni);
+  document.getElementById('omBulan').textContent = rp(d.omset.bulanIni);
+  document.getElementById('totOrder').textContent = d.omset.totalOrder + ' (' + d.omset.orderHariIni + ' hari ini)';
+  const ctx = document.getElementById('chartOmset');
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, { type:'bar',
+    data:{ labels:d.grafik.map(g=>g.tanggal), datasets:[{ data:d.grafik.map(g=>g.total), backgroundColor:'rgba(79,70,229,.7)', borderRadius:6 }] },
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } },
+      scales:{ y:{ ticks:{ callback:v => (v/1000)+'rb' } } } } });
+  document.getElementById('orderRows').innerHTML = d.orders.map(o => `
+    <tr class="border-b last:border-0"><td class="py-2 pr-2 font-mono text-xs">${o.id}</td>
+    <td class="pr-2">${esc(o.nama)}</td><td class="pr-2">${rp(o.total)}</td>
+    <td><span class="status-${o.status} text-xs px-2 py-0.5 rounded-full">${STATUS_LABEL[o.status]||o.status}</span></td></tr>`).join('')
+    || '<tr><td colspan="4" class="py-3 text-center text-slate-400">Belum ada order</td></tr>';
+  document.getElementById('prodRows').innerHTML = d.products.map(p => `
+    <tr class="border-b last:border-0"><td class="py-2 pr-2">${esc(p.nama)}</td>
+    <td class="pr-2">${rp(p.harga)}</td>
+    <td class="${p.stok < 10 ? 'stok-rendah' : ''}">${p.stok}${p.stok < 10 ? ' ⚠️' : ''}</td></tr>`).join('');
+}
+
+/* ---------- TAB 2: buat pesanan ---------- */
+async function loadProdukDropdown() {
+  const r = await api('/api/dash-admin?action=products');
+  const d = await r.json();
+  if (!d.ok) return;
+  PRODUCTS = d.products;
+  const sel = document.getElementById('obProduk');
+  sel.innerHTML = PRODUCTS.map(p => `<option value="${p.id}">${esc(p.nama)} — ${rp(p.harga)}</option>`).join('');
+  updObTotal();
+}
+function updObTotal() {
+  const p = PRODUCTS.find(x => String(x.id) === document.getElementById('obProduk').value);
+  const q = Math.max(1, parseInt(document.getElementById('obQty').value, 10) || 1);
+  document.getElementById('obTotal').value = p ? rp(p.harga * q) : '-';
+}
+document.getElementById('obProduk').onchange = updObTotal;
+document.getElementById('obQty').oninput = updObTotal;
+document.getElementById('obSubmit').onclick = async () => {
+  const payload = {
+    product_id: document.getElementById('obProduk').value,
+    qty: document.getElementById('obQty').value,
+    nama: document.getElementById('obNama').value.trim(),
+    wa: document.getElementById('obWa').value.trim(),
+    alamat: document.getElementById('obAlamat').value.trim(),
+  };
+  if (!payload.nama) return alert('Nama wajib diisi');
+  const res = document.getElementById('obResult');
+  res.classList.remove('hidden'); res.textContent = '⏳ Menyimpan...';
+  const r = await api('/api/dash-admin?action=create-order', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  const d = await r.json();
+  if (!d.ok) { res.textContent = '❌ ' + d.error; return; }
+  res.innerHTML = `✅ Pesanan <b>${d.id}</b> dibuat! Total <b>${rp(d.total)}</b>`;
+  document.getElementById('obNama').value = ''; document.getElementById('obWa').value = ''; document.getElementById('obAlamat').value = '';
+};
+
+/* ---------- TAB 3: kelola order ---------- */
+async function loadOrders() {
+  const st = document.getElementById('ordStatus').value;
+  const q = document.getElementById('ordSearch').value.trim();
+  const r = await api(`/api/dash-admin?action=orders&status=${encodeURIComponent(st)}&search=${encodeURIComponent(q)}`);
+  const d = await r.json();
+  if (!d.ok) { alert('Gagal: ' + d.error); return; }
+  document.getElementById('ordRows').innerHTML = d.orders.map(o => `
+    <tr class="border-b last:border-0">
+      <td class="py-2 pr-2 font-mono text-xs">${o.id}<br><span class="text-slate-400">${fmtTgl(o.tanggal)}</span></td>
+      <td class="pr-2">${esc(o.nama_penerima)}</td><td class="pr-2">${rp(o.total_harga)}</td>
+      <td class="pr-2"><span class="status-${o.status} text-xs px-2 py-0.5 rounded-full">${STATUS_LABEL[o.status]||o.status}</span></td>
+      <td class="whitespace-nowrap">
+        <button class="text-indigo-600 text-xs font-semibold mr-2" onclick="ordDetail('${o.id}')">Detail</button>
+        <select class="text-xs border rounded px-1 py-0.5" onchange="ordSetStatus('${o.id}', this.value)">
+          <option value="">Ubah…</option>
+          ${Object.keys(STATUS_LABEL).map(s => `<option value="${s}" ${s===o.status?'disabled':''}>${STATUS_LABEL[s]}</option>`).join('')}
+        </select>
+      </td></tr>`).join('')
+    || '<tr><td colspan="5" class="py-3 text-center text-slate-400">Tidak ada order</td></tr>';
+}
+document.getElementById('ordCari').onclick = loadOrders;
+document.getElementById('ordSearch').addEventListener('keydown', e => { if (e.key === 'Enter') loadOrders(); });
+document.getElementById('ordStatus').onchange = loadOrders;
+async function ordSetStatus(id, status) {
+  if (!status || !confirm(`Ubah ${id} → ${STATUS_LABEL[status]}?`)) return;
+  const r = await api('/api/dash-admin?action=update-order', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id, status }) });
+  const d = await r.json();
+  if (!d.ok) return alert('Gagal: ' + d.error);
+  loadOrders();
+}
+async function ordDetail(id) {
+  const r = await api(`/api/dash-admin?action=order&id=${encodeURIComponent(id)}`);
+  const d = await r.json();
+  if (!d.ok) return alert('Gagal: ' + d.error);
+  const o = d.order;
+  document.getElementById('ordDetail').classList.remove('hidden');
+  document.getElementById('ordDetail').innerHTML = `
+    <h3 class="font-semibold mb-2">🧾 ${o.id}</h3>
+    <div class="text-sm grid grid-cols-2 gap-x-4 gap-y-1 mb-2">
+      <span class="text-slate-500">Nama</span><span>${esc(o.nama_penerima)}</span>
+      <span class="text-slate-500">WA</span><span>${esc(o.nomor_wa)}</span>
+      <span class="text-slate-500">Alamat</span><span>${esc(o.alamat_lengkap)}</span>
+      <span class="text-slate-500">Total</span><span class="font-bold">${rp(o.total_harga)}</span>
+      <span class="text-slate-500">Status</span><span><span class="status-${o.status} text-xs px-2 py-0.5 rounded-full">${STATUS_LABEL[o.status]}</span></span>
+      ${o.nomor_resi ? `<span class="text-slate-500">Resi</span><span class="font-mono">${esc(o.nomor_resi)}</span>` : ''}
+    </div>
+    <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+      <th class="py-1 pr-2">Item</th><th class="pr-2">Qty</th><th>Harga</th></tr></thead>
+      <tbody>${d.items.map(i => `<tr class="border-b last:border-0"><td class="py-1 pr-2">${esc(i.nama_produk)}</td><td class="pr-2">${i.qty}</td><td>${rp(i.harga_satuan)}</td></tr>`).join('')}</tbody></table>`;
+  document.getElementById('ordDetail').scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+
+/* ---------- TAB 4: produk ---------- */
+async function loadProduk() {
+  const r = await api('/api/dash-admin?action=products');
+  const d = await r.json();
+  if (!d.ok) return;
+  document.getElementById('prRows').innerHTML = d.products.map(p => `
+    <tr class="border-b last:border-0">
+      <td class="py-2 pr-2">${esc(p.nama)}<br><span class="text-xs text-slate-400 font-mono">${esc(p.id)}</span></td>
+      <td class="pr-2 text-xs">${esc(p.kategori)}</td>
+      <td class="pr-2"><input type="number" value="${p.harga}" id="ph-${p.id}" class="inp !w-28 !py-1 text-xs"></td>
+      <td class="pr-2"><input type="number" value="${p.stok}" id="ps-${p.id}" class="inp !w-20 !py-1 text-xs"></td>
+      <td class="whitespace-nowrap">
+        <button class="text-indigo-600 text-xs font-semibold mr-2" onclick="prSave('${p.id}')">💾</button>
+        <button class="btn-danger" onclick="prDel('${p.id}','${esc(p.nama)}')">Hapus</button>
+      </td></tr>`).join('');
+}
+async function prSave(id) {
+  const harga = document.getElementById('ph-' + id).value;
+  const stok = document.getElementById('ps-' + id).value;
+  const r = await api('/api/dash-admin?action=update-product', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id, harga, stok }) });
+  const d = await r.json();
+  alert(d.ok ? '✅ Tersimpan' : '❌ ' + d.error);
+}
+async function prDel(id, nama) {
+  if (!confirm(`Hapus produk "${nama}"?`)) return;
+  const r = await api('/api/dash-admin?action=delete-product', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id }) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  loadProduk();
+}
+document.getElementById('prAdd').onclick = async () => {
+  const payload = { nama: document.getElementById('prNama').value.trim(),
+    kategori: document.getElementById('prKategori').value.trim() || 'Lainnya',
+    harga: document.getElementById('prHarga').value, stok: document.getElementById('prStok').value };
+  if (!payload.nama) return alert('Nama wajib diisi');
+  const r = await api('/api/dash-admin?action=add-product', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  document.getElementById('prNama').value = ''; document.getElementById('prHarga').value = ''; document.getElementById('prStok').value = '';
+  loadProduk();
+};
+
+/* ---------- TAB 5: keuangan ---------- */
+async function loadKeuangan() {
+  const rk = await api('/api/dash-admin?action=keuangan'); const k = await rk.json();
+  if (k.ok) {
+    document.getElementById('kOmHari').textContent = rp(k.omsetHari);
+    document.getElementById('kKelHari').textContent = rp(k.keluarHari);
+    document.getElementById('kOmBulan').textContent = rp(k.omsetBulan);
+    document.getElementById('kProfit').textContent = rp(k.omsetBulan - k.keluarBulan);
+  }
+  const r = await api('/api/dash-admin?action=pengeluaran'); const d = await r.json();
+  if (d.belumMigrasi) {
+    document.getElementById('kgRows').innerHTML = '<tr><td colspan="4" class="py-3 text-center text-slate-400">Jalankan migrasi supabase-migrasi-fitur-admin.sql dulu</td></tr>';
+    return;
+  }
+  document.getElementById('kgRows').innerHTML = (d.pengeluaran || []).map(p => `
+    <tr class="border-b last:border-0"><td class="py-2 pr-2 text-xs">${fmtTgl(p.tanggal)}</td>
+    <td class="pr-2">${esc(p.keterangan)}</td><td class="pr-2">${rp(p.nominal)}</td>
+    <td><button class="btn-danger" onclick="kgDel('${p.id}')">Hapus</button></td></tr>`).join('')
+    || '<tr><td colspan="4" class="py-3 text-center text-slate-400">Belum ada pengeluaran</td></tr>';
+}
+document.getElementById('kgAdd').onclick = async () => {
+  const nominal = document.getElementById('kgNominal').value;
+  const keterangan = document.getElementById('kgKet').value.trim();
+  if (!nominal) return alert('Nominal wajib diisi');
+  const r = await api('/api/dash-admin?action=add-pengeluaran', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ nominal, keterangan }) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  document.getElementById('kgNominal').value = ''; document.getElementById('kgKet').value = '';
+  loadKeuangan();
+};
+async function kgDel(id) {
+  if (!confirm('Hapus pengeluaran ini?')) return;
+  const r = await api('/api/dash-admin?action=delete-pengeluaran', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id }) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  loadKeuangan();
+}
+
+/* ---------- boot ---------- */
+async function boot() { await loadDash(); }
+if (PIN) { showLogin(false); boot(); }
+</script>
+</body>
+</html>
