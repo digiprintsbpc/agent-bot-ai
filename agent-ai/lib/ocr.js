@@ -104,4 +104,22 @@ function extractResiInfo(text) {
   return out;
 }
 
-module.exports = { ocrImage, extractAmounts, extractResiInfo };
+// Ekstrak SEMUA kandidat angka (6+ digit) untuk dicocokkan dengan database.
+// Mengembalikan array unik, urut dari yang terpanjang (lebih spesifik dulu).
+function extractAllNumbers(text) {
+  const t = String(text || '');
+  const found = new Set();
+  // Angka 6-20 digit (bisa dengan spasi/titik/dash sebagai pemisah ribuan)
+  const re = /\b\d[\d\s.\-]{5,25}\d\b/g;
+  let m;
+  while ((m = re.exec(t))) {
+    const digits = m[0].replace(/\D/g, '');
+    if (digits.length >= 6 && digits.length <= 20) found.add(digits);
+  }
+  // Juga tangkap INV-xxxxxx → ambil angka saja
+  const invRe = /INV-(\d{6})/gi;
+  while ((m = invRe.exec(t))) found.add(m[1]);
+  return [...found].sort((a, b) => b.length - a.length);
+}
+
+module.exports = { ocrImage, extractAmounts, extractResiInfo, extractAllNumbers };
