@@ -1036,12 +1036,12 @@ function drawClock() {
 
 // ---------------------------------------------------------------- karakter (dirakit prosedural)
 const LOOKS = {
-  ketua: { shirt: '#6f5bbd', pants: '#2d3140', skin: '#b97d52', hair: '#221a15', hairStyle: 'side', tie: true },
+  ketua: { shirt: '#1f2a44', pants: '#1a1f2e', skin: '#b97d52', hair: '#221a15', hairStyle: 'side', tie: true },
   team: [
-    { shirt: '#4d7fd6', pants: '#3a4150', skin: '#c68a5e', hair: '#2a211c', hairStyle: 'short', glasses: true },
-    { shirt: '#3a9b72', pants: '#2e333d', skin: '#d6a07a', hair: '#3b2a1f', hairStyle: 'bun' },
-    { shirt: '#e38b4f', pants: '#4a4f5c', skin: '#a86e45', hair: '#191310', hairStyle: 'curly', headphones: true },
-    { shirt: '#cf5a90', pants: '#34384a', skin: '#e0b08a', hair: '#5a3a22', hairStyle: 'long' },
+    { shirt: '#2c3e5a', pants: '#1e2530', skin: '#c68a5e', hair: '#2a211c', hairStyle: 'short', tie: true, glasses: true },
+    { shirt: '#3a4a5c', pants: '#232a35', skin: '#d6a07a', hair: '#3b2a1f', hairStyle: 'bun', tie: true },
+    { shirt: '#2e3b4f', pants: '#1f2632', skin: '#a86e45', hair: '#191310', hairStyle: 'short', tie: true },
+    { shirt: '#34455e', pants: '#252c38', skin: '#e0b08a', hair: '#5a3a22', hairStyle: 'long', tie: true },
   ],
 };
 function freelancerLook(name, color) {
