@@ -1,7 +1,8 @@
 'use strict';
 /**
  * Otak AI dengan failover antar provider ("akumulasi token antar AI").
- * Urutan: Groq (utama, gratis & cepat) -> NVIDIA (cadangan, gratis).
+ * Urutan: Groq (utama, gratis & cepat) -> NVIDIA (cadangan, gratis)
+ *          -> EXTRA (cadangan tambahan, OpenAI-compatible, opsional).
  * Daftar provider gratis lain (referensi): Free-LLM-Collection (OpenAI-format).
  *
  * Semua provider di bawah memakai format OpenAI chat/completions,
@@ -24,7 +25,13 @@ function providers() {
       key: opt('NVIDIA_API_KEY', ''),
       model: opt('NVIDIA_MODEL', 'meta/llama-3.2-11b-vision-instruct'),
     },
-  ].filter((p) => p.key);
+    {
+      name: opt('EXTRA_NAME', 'extra'),
+      url: opt('EXTRA_BASE_URL', '').replace(/\/$/, '') + '/chat/completions',
+      key: opt('EXTRA_API_KEY', ''),
+      model: opt('EXTRA_MODEL', 'glm-5.3'),
+    },
+  ].filter((p) => p.key && p.url !== '/chat/completions');
 }
 
 async function callProvider(p, messages, maxTokens, temperature, timeoutMs) {
