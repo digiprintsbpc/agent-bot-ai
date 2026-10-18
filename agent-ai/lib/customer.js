@@ -402,6 +402,13 @@ async function handleCustomer(userId, text, onPhoto) {
   // Step: konfirmasi
   if (session.step === 'confirm') {
     if (isYes(q)) {
+      // K3: cegah order ganda — jika draft sudah punya order_id, pakai yang ada
+      if (d.order_id) {
+        const existing = await sbGet('orders', { select: 'id', id: `eq.${d.order_id}`, limit: 1 }).catch(() => []);
+        if (existing[0]) {
+          return `Pesanan ${d.order_id} sudah dibuat kak, tinggal tunggu QRIS-nya ya 😊`;
+        }
+      }
       // Bug #1: klaim atomik — dua "YA" cepat hanya satu yang lolos.
       const claimed = await claimConfirmSession(userId);
       if (!claimed) return 'Pesananmu sedang diproses ya kak, tunggu sebentar 😊';
@@ -615,13 +622,15 @@ async function handleCustomerPhoto(userId, fileId) {
               body: JSON.stringify([{ to_wa: custWa, kind: 'document', content: publicUrl, caption: `Invoice-${d.order_id}.pdf`, status: 'pending' }]),
             }).catch(() => {});
           }
-          // 4. Notifikasi ke admin WA
-          const adminWa = (process.env.ADMIN_WA || '083143152613').replace(/\D/g, '');
-          const notif = `💰 *PEMBAYARAN OTOMATIS TERKONFIRMASI*\n\nPesanan: ${d.order_id}\nCustomer: ${d.name} (${d.phone})\nNominal: ${rp(read)} ✅\n\nInvoice sudah dikirim otomatis ke WA customer.`;
-          await fetch(`${SB_URL2}/rest/v1/wa_outbox`, {
-            method: 'POST', headers: H,
-            body: JSON.stringify([{ to_wa: adminWa, kind: 'text', content: notif, status: 'pending' }]),
-          }).catch(() => {});
+          // 4. Notifikasi ke admin WA (hanya jika ADMIN_WA diisi di env)
+          const adminWa = (process.env.ADMIN_WA || '').replace(/\D/g, '');
+          if (adminWa.length >= 10) {
+            const notif = `💰 *PEMBAYARAN OTOMATIS TERKONFIRMASI*\n\nPesanan: ${d.order_id}\nCustomer: ${d.name} (${d.phone})\nNominal: ${rp(read)} ✅\n\nInvoice sudah dikirim otomatis ke WA customer.`;
+            await fetch(`${SB_URL2}/rest/v1/wa_outbox`, {
+              method: 'POST', headers: H,
+              body: JSON.stringify([{ to_wa: adminWa, kind: 'text', content: notif, status: 'pending' }]),
+            }).catch(() => {});
+          }
         }
       }
       // 5. Bersihkan sesi

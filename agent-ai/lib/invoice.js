@@ -51,7 +51,7 @@ function generateInvoice(order) {
       doc.fontSize(10).font('Helvetica').fillColor('#666666')
         .text('Cetak Nota & Kwitansi Custom', 50, 78);
       doc.fontSize(10).fillColor('#666666')
-        .text('WhatsApp: 08123143152613', 50, 92);
+        .text('WhatsApp: 0812-xxxx-xxxx', 50, 92);
 
       // Nomor invoice & tanggal (kanan)
       doc.fontSize(14).font('Helvetica-Bold').fillColor('#1a1a1a')

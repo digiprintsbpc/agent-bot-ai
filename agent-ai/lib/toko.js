@@ -22,6 +22,7 @@ Tabel dan kolom yang tersedia:
 Tugas: baca pertanyaan user (Bahasa Indonesia), keluarkan SATU objek JSON saja:
 {"queries": [{"table": "orders|products|customers|order_summary", "select": "kolom1,kolom2", "filter": {"kolom": "eq.nilai"}, "order": "kolom.desc", "limit": 20}]}
 Aturan filter: "eq.nilai" sama dengan, "ilike.*teks*" mengandung teks, "gte.2026-10-01" tanggal >= , "lte.2026-10-18" tanggal <= .
+Untuk pencarian nomor WA/Hape: jika user memberi nomor lengkap (10+ digit) pakai "ilike.*nomor*"; jika hanya akhiran (mis. "3053", 4 digit) juga pakai "ilike.*3053*" pada kolom nomor_wa.
 Untuk pertanyaan tanggal relatif ("minggu ini", "hari ini"), hitung dari hari ini dan pakai gte/lte.
 Jika pertanyaan tidak butuh data (salam, basa-basi), keluarkan {"queries": []}.
 PENTING: pertanyaan tentang PRODUK (ukuran, varian, harga, stok, "nota ukuran mana",

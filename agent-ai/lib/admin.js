@@ -551,7 +551,7 @@ async function handleMessage(chatId, msg) {
 
     // ===== FITUR JUALAN: kirim PDF/invoice ke customer (bahasa natural) =====
     // Cth: "bisakah kamu kirimkan ke customer format pdf?", "kirim invoice ke wa customer", "generate pdf"
-    if (/kirim.*(pdf|invoice)|(pdf|invoice).*(kirim|customer|pelanggan)|generate.*(pdf|invoice)|(pdf|invoice).*generate/i.test(text)) {
+    if (/kirim.*(pdf|invoice|struk|nota|kwitansi)|(pdf|invoice|struk|nota|kwitansi).*(kirim|customer|pelanggan)|generate.*(pdf|invoice|struk)|(pdf|invoice|struk).*(generate)/i.test(text)) {
       // Cari INV-xxx di pesan ini atau state terakhir
       let orderId = (text.match(/INV-\d{6}/i) || [])[0];
       if (!orderId) {
@@ -1059,8 +1059,9 @@ async function handleFotoOtomatis(chatId, msg, captionText) {
     if (nums.length) {
       const rows = await sbGet('orders', { select: 'id,nama_penerima,nomor_wa,alamat_lengkap,status', order: 'tanggal.desc', limit: 100 }).catch(() => []);
       for (const num of nums) {
-        // Cek: cocok dengan bagian ID order (INV-xxxxxx → xxxxxx)
-        order = rows.find((r) => String(r.id || '').replace(/\D/g, '').includes(num) || num.includes(String(r.id || '').replace(/\D/g, '')));
+        if (num.length < 6) continue; // K4: abaikan angka pendek (false positive)
+        // Cek: cocok dengan bagian ID order (INV-xxxxxx → xxxxxx), minimal 6 digit penuh
+        order = rows.find((r) => { const idD = String(r.id || '').replace(/\D/g, ''); return idD.length >= 6 && (idD === num || (num.length >= 8 && idD.includes(num)) || (idD.length >= 8 && num.includes(idD))); });
         if (order) { console.log('[ocr-resi] cocok via ID:', num); break; }
         // Cek: cocok dengan nomor WA (6+ digit terakhir)
         const waDigits = (s) => String(s || '').replace(/\D/g, '').slice(-10);

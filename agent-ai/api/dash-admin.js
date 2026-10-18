@@ -190,7 +190,7 @@ module.exports = async (req, res) => {
           // Generate QRIS
           let qrUrl = null;
           try {
-            const payinaja = require('./payinaja');
+            const payinaja = require('../lib/payinaja');
             const qris = await payinaja.createQRIS(total, orderId, String(nama || '-'), cWa);
             if (qris.ok) {
               qrUrl = qris.qr_image_url;
