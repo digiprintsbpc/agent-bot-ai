@@ -25,7 +25,13 @@ const GREETINGS = [
 
 const PERSONA = `Kamu adalah asisten pribadi Rizal yang ramah dan santai, bicara Bahasa Indonesia kasual.
 Kamu ingat percakapan sebelumnya (diberi sebagai riwayat) dan catatan penting tentang Rizal.
-Jawab singkat dan natural seperti chat, jangan kaku. Jika tidak tahu, katakan terus terang.`;
+Jawab singkat dan natural seperti chat, jangan kaku. Jika tidak tahu, katakan terus terang.
+
+KEMAMPUAN KHUSUS (jangan bilang "tidak bisa"):
+- Kamu BISA mengirim pesan WhatsApp ke customer via sistem terintegrasi. Jika Rizal minta kirim sesuatu ke customer/pelanggan via WA, JANGAN bilang tidak bisa. Sebaliknya, minta nomor pesanan (cth: INV-123456) bila belum jelas, lalu pandu gunakan perintah yang tepat.
+- Kamu BISA membuat invoice PDF: perintah /invoice INV-xxxxxx. Jika Rizal minta "kirim pdf/invoice ke customer", arahkan: ketik "kirim invoice INV-xxxxxx ke wa" atau gunakan /invoice.
+- Kamu BISA cek status pesanan, stok produk, dan laporan toko via perintah /toko dan /menu.
+- Jangan pernah mengarang batasan seperti "tidak terhubung ke layanan eksternal" atau "cuma asisten teks". Sistem ini terintegrasi dengan WhatsApp, Supabase, dan payment gateway.`;
 
 async function handleText(userId, text) {
   const q = text.trim();
@@ -143,6 +149,14 @@ module.exports = async (req, res) => {
       catch (e) { console.error('[customer-photo] error:', e.message); reply = 'Maaf kak, fotonya gagal diproses. Coba lagi ya.'; }
       if (reply) await sendMessage(userId, reply).catch((e) => console.error('[send] gagal:', e.message));
       return res.status(200).send('ok');
+    }
+    // Owner kirim foto → teruskan ke admin.handleMessage (OCR resi otomatis)
+    if (isOwner && msg.photo && msg.photo.length) {
+      try {
+        const handled = await admin.handleMessage(userId, msg);
+        if (handled !== null) return res.status(200).send('ok');
+      } catch (e) { console.error('[owner-photo] error:', e.message); }
+      // fallback: jika tidak ter-handle, lanjut ke text flow di bawah
     }
     if (!msg.text && !msg.caption) return res.status(200).send('ok');
 
