@@ -487,7 +487,8 @@ async function handleCustomer(userId, text, onPhoto) {
     // Katalog HANYA bila diminta eksplisit, atau saat mau pesan tapi produknya belum jelas.
     // Selain itu (mis. tanya ukuran, tanya harga satuan) → jawab saja, tanpa katalog.
     const wantsCatalog = /katalog|daftar harga|price list|jualan apa|jual apa|produk apa|semua produk/i.test(q);
-    if (!d.product_id && (wantsCatalog || p.intent === 'order')) {
+    // Katalog HANYA bila diminta eksplisit — jangan spam tiap pesan order.
+    if (wantsCatalog) {
       return `${p.reply}\n\nDaftar harga kami kak:\n${catalogCompact(products)}`;
     }
     return p.reply;
