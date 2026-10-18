@@ -6,6 +6,7 @@ gratis) dengan **failover otomatis ke NVIDIA** (cadangan, gratis)
 dan **EXTRA** (cadangan tambahan OpenAI-compatible, opsional).
 
 ## Arsitektur
+
 ```
 Telegram --webhook--> Vercel Function (/api/telegram)
                             |-- Groq API  (utama)
