@@ -175,6 +175,7 @@ ATURAN:
 - intent: order (mau pesan), ask (tanya produk/harga), track (tanya status pesanan / menyebut INV-), paid (bilang sudah bayar/lunas), cancel (batal), greeting (salam), other.
 - confirmed: true bila pelanggan menyetujui ("ya", "oke", "setuju"), false bila menolak ("tidak", "batal"), null bila tidak ada.
 - reply: balasan natural 1-3 kalimat. Bila masih ada yang kurang dan step collecting/idle, tanyakan SATU hal yang paling penting berikutnya. Jangan mengarang harga.
+- PENTING: Jangan pernah tampilkan daftar produk/katalog dalam reply. Kalau pelanggan tanya ukuran spesifik (mis. "1/2"), jawab HANYA tentang ukuran itu (varian ply & harga). Jangan sebutkan ukuran lain. Katalog hanya ditampilkan oleh sistem bila pelanggan minta eksplisit.
 
 Balas HANYA JSON valid:
 {"intent":"order","product_id":null,"product_hint":null,"qty":null,"name":null,"phone":null,"address":null,"confirmed":null,"reply":"..."}
@@ -245,6 +246,17 @@ async function createOrder(draft) {
     qrUrl = qris.qr_image_url;
     await sbPatch('orders', { id: `eq.${orderId}` }, { payment_trx_id: trxId }).catch(() => {});
   }
+
+  // FITUR ADMIN: notifikasi order baru ke owner via Telegram
+  try {
+    if (OWNER_ID) {
+      await sendMessage(OWNER_ID,
+        `🛍️ *ORDER BARU!*\n\n🧾 *${orderId}*\n👤 ${draft.name} (${draft.phone})\n📦 ${draft.product_nama} × ${draft.qty}\n💰 ${rp(total)}` +
+        (qris.ok ? '\n✅ QRIS dibuat' : `\n⚠️ QRIS gagal: ${qris.error || 'unknown'}`),
+        { parse_mode: 'Markdown' }).catch(() => {});
+    }
+  } catch (e) { console.error('[customer] notif order baru gagal:', e.message); }
+
   return { orderId, total, trxId, qrUrl, qrisError: qris.ok ? null : qris.error };
 }
 

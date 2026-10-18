@@ -164,6 +164,7 @@ async function showHome(chatId, messageId = null) {
     [{ text: '🔍 Cek Pesanan', callback_data: 'home_cek' }, { text: '📦 Update Paket', callback_data: 'home_paket' }],
     [{ text: '📦 Kelola Produk', callback_data: 'home_produk' }, { text: '📂 Edukasi & Promo', callback_data: 'home_edukasi' }],
     [{ text: '📊 Laporan', callback_data: 'home_laporan' }, { text: '⚙️ Setting Toko', callback_data: 'home_setting' }],
+    [{ text: '📈 Dashboard', callback_data: 'home_dashboard' }, { text: '💸 Keuangan', callback_data: 'home_keuangan' }],
     [{ text: '💸 Tarik Dana', url: 'https://payinaja.com/dashboard/withdraw' }],
   ]) };
   if (messageId) await tg.editMessageText(chatId, messageId, text, options);
@@ -229,7 +230,12 @@ async function handleCallback(chatId, msgId, data, queryId) {
 
   if (data === 'home_produk') {
     return edit('📦 *KELOLA KATALOG PRODUK*\nSilakan pilih menu di bawah ini:',
-      kb([[{ text: '➕ Tambah Produk Baru', callback_data: 'produk_tambah' }], [{ text: '✏️ Edit Produk', callback_data: 'produk_edit' }], BACK_HOME[0]]));
+      kb([
+        [{ text: '📋 Lihat Produk', callback_data: 'produk_lihat' }],
+        [{ text: '➕ Tambah Produk Baru', callback_data: 'produk_tambah' }, { text: '✏️ Edit Produk', callback_data: 'produk_edit' }],
+        [{ text: '🗑️ Hapus Produk', callback_data: 'produk_hapus' }],
+        BACK_HOME[0],
+      ]));
   }
 
   if (data === 'produk_tambah') {
@@ -380,6 +386,58 @@ async function handleCallback(chatId, msgId, data, queryId) {
     return edit(`✅ Status diubah menjadi ${statusBaru}`);
   }
 
+  // ===== FITUR ADMIN: Dashboard omset =====
+  if (data === 'home_dashboard') return handleDashboard(chatId, msgId);
+
+  // ===== FITUR ADMIN: Keuangan =====
+  if (data === 'home_keuangan') {
+    return edit('💸 *KEUANGAN TOKO*\n\nCatat pengeluaran: `/keluar 50000 beli tinta`\n_(bisa juga pakai | : `/keluar 25000|parkir`)_',
+      kb([
+        [{ text: '📝 Rekap Pengeluaran', callback_data: 'keu_rekap' }],
+        [{ text: '📥 Export Data', callback_data: 'keu_export' }],
+        BACK_HOME[0],
+      ]));
+  }
+  if (data === 'keu_rekap') return handleRekap(chatId, msgId);
+  if (data === 'keu_export') {
+    return edit('📥 *EXPORT DATA*\nPilih data yang mau di-export ke CSV (bisa dibuka di Excel):',
+      kb([
+        [{ text: '🛍️ Order', callback_data: 'exp_orders' }],
+        [{ text: '📦 Produk', callback_data: 'exp_products' }],
+        [{ text: '👥 Customer', callback_data: 'exp_customers' }],
+        [{ text: '🔙 Kembali', callback_data: 'home_keuangan' }],
+      ]));
+  }
+  if (data === 'exp_orders' || data === 'exp_products' || data === 'exp_customers') {
+    return handleExport(chatId, data.split('_')[1]);
+  }
+
+  // ===== FITUR ADMIN: Lihat & hapus produk =====
+  if (data === 'produk_lihat') {
+    try {
+      const prods = await sbGet('products', { select: 'id,nama,harga,stok', order: 'id', limit: 100 });
+      if (!prods.length) return edit('📦 Katalog kosong.', kb([BACK_HOME[0]]));
+      const lines = prods.map((p) => `• *${p.id}* — ${p.nama}\n  ${rp(p.harga)} | stok: ${p.stok ?? 0}`);
+      return edit(`📋 *DAFTAR PRODUK (${prods.length})*\n\n${lines.join('\n')}`, kb([BACK_HOME[0]]));
+    } catch (e) { return edit(`❌ Gagal: ${e.message}`, kb([BACK_HOME[0]])); }
+  }
+  if (data === 'produk_hapus') {
+    await tg.deleteMessage(chatId, msgId).catch(() => {});
+    await setAdminState(chatId, 'prod_del_find', {});
+    return tg.sendMessage(chatId, '🗑️ *HAPUS PRODUK*\n\nKetik *ID produk* yang mau dihapus:\n\nKetik /batal untuk membatalkan.', MD);
+  }
+  if (data.startsWith('produk_del_ya_')) {
+    const pid = data.replace('produk_del_ya_', '');
+    try {
+      await sbDel('products', { id: `eq.${pid}` });
+      await logActivity('produk', `Produk ${pid} dihapus.`);
+      return edit(`✅ Produk *${pid}* dihapus dari katalog.`, kb([[{ text: '🔙 Kelola Produk', callback_data: 'home_produk' }]]));
+    } catch (e) { return edit(`❌ Gagal hapus: ${e.message}`, kb([[{ text: '🔙 Kelola Produk', callback_data: 'home_produk' }]])); }
+  }
+  if (data === 'produk_del_batal') {
+    return edit('🚫 Hapus produk dibatalkan.', kb([[{ text: '🔙 Kelola Produk', callback_data: 'home_produk' }]]));
+  }
+
   if (data.startsWith('oqty_')) {
     const parts = data.split('_'); const action = parts[1]; let count = parseInt(parts[2], 10);
     if (action === 'dec' && count > 1) count--;
@@ -440,6 +498,25 @@ async function handleMessage(chatId, msg) {
     }
     // Konfirmasi broadcast: YA / BATAL
     // (state broadcast_confirm ditangani di bawah)
+
+    // ===== FITUR ADMIN: /dashboard =====
+    if (text === '/dashboard') return handleDashboard(chatId);
+
+    // ===== FITUR ADMIN: /keluar =====
+    if (text.startsWith('/keluar')) return handleKeluar(chatId, text);
+
+    // ===== FITUR ADMIN: /rekap =====
+    if (text === '/rekap') return handleRekap(chatId);
+
+    // ===== FITUR ADMIN: /export =====
+    if (text === '/export') {
+      return tg.sendMessage(chatId, '📥 *EXPORT DATA*\nPilih data yang mau di-export ke CSV (bisa dibuka di Excel):',
+        { ...MD, ...kb([
+          [{ text: '🛍️ Order', callback_data: 'exp_orders' }],
+          [{ text: '📦 Produk', callback_data: 'exp_products' }],
+          [{ text: '👥 Customer', callback_data: 'exp_customers' }],
+        ]) });
+    }
 
     // ===== FITUR JUALAN: foto + caption /kirim =====
     if (hasPhoto && /^\/kirim\s+/i.test(text)) return handleKirimGambar(chatId, msg, text);
@@ -627,6 +704,30 @@ async function handleMessage(chatId, msg) {
     } catch { await tg.editMessageText(chatId, wait.message_id, '❌ Gagal memperbarui database.'); }
     await clearAdminState(chatId);
     return;
+  }
+
+  // --- FITUR ADMIN: Hapus produk (konfirmasi) ---
+  if (step === 'prod_del_find') {
+    const prod = await getProduk(input);
+    if (!prod) return tg.sendMessage(chatId, '❌ Produk tidak ditemukan. Kirim ID yang benar, atau /batal.');
+    await setAdminState(chatId, 'prod_del_confirm', { temp: { id: prod.id, nama: prod.nama } });
+    return tg.sendMessage(chatId,
+      `⚠️ *Yakin hapus produk ini?*\n\n📦 *${prod.id}* — ${prod.nama}\n💰 ${rp(prod.hrg)} | stok: ${prod.stok}\n\nKetik *YA* untuk hapus, atau /batal.`, MD);
+  }
+  if (step === 'prod_del_confirm') {
+    if (!/^(ya|iya|oke|ok|hapus|yes)$/i.test(input)) {
+      await clearAdminState(chatId);
+      return tg.sendMessage(chatId, '🚫 Hapus produk dibatalkan.', { ...MD, ...kb(BACK_MAIN) });
+    }
+    try {
+      await sbDel('products', { id: `eq.${d.temp.id}` });
+      await logActivity('produk', `Produk ${d.temp.id} dihapus.`);
+      await clearAdminState(chatId);
+      return tg.sendMessage(chatId, `✅ Produk *${d.temp.id}* (${d.temp.nama}) dihapus.`, { ...MD, ...kb(BACK_MAIN) });
+    } catch (e) {
+      await clearAdminState(chatId);
+      return tg.sendMessage(chatId, `❌ Gagal hapus: ${e.message}`, MD);
+    }
   }
 
   // --- Cek pesanan ---
@@ -963,7 +1064,22 @@ async function handleFotoOtomatis(chatId, msg, captionText) {
   const hari = getEstimasi(order.alamat_lengkap);
   const pesanWA = `📦 *PESANAN DIKIRIM (${order.id})*\n\nHalo kak ${order.nama_penerima}! Paket sudah diserahkan ke kurir. 🚚\n${info.resi ? `*No. Resi:* ${info.resi}${info.resiKurir ? ` (${info.resiKurir})` : ''}\n` : ''}(Otomatis selesai dalam ${hari} hari)`;
   if (order.nomor_wa) {
-    await queueWA(order.nomor_wa, 'image', fileUrl, pesanWA, fileUrl);
+    // Upload foto ke Storage dulu (URL Telegram kedaluwarsa cepat)
+    let imgPublicUrl = fileUrl;
+    try {
+      const imgRes = await fetch(fileUrl);
+      if (imgRes.ok) {
+        const imgBuf = Buffer.from(await imgRes.arrayBuffer());
+        const imgName = `resi-${order.id}-${Date.now()}.jpg`;
+        const upImg = await fetch(`${SB_URL}/storage/v1/object/invoices/${imgName}`, {
+          method: 'POST',
+          headers: { ...sbHeaders(), 'Content-Type': 'image/jpeg' },
+          body: imgBuf,
+        });
+        if (upImg.ok) imgPublicUrl = `${SB_URL}/storage/v1/object/public/invoices/${imgName}`;
+      }
+    } catch (e) { console.error('[ocr-resi] upload img gagal:', e.message); }
+    await queueWA(order.nomor_wa, 'image', imgPublicUrl, pesanWA, imgPublicUrl);
   }
   await logActivity('resi', `Resi ${order.id} terkirim via OCR otomatis. Resi: ${info.resi || '-'}. Estimasi ${hari} hari.`);
 
@@ -1029,6 +1145,153 @@ async function handleTemplateOrder(chatId, text) {
     await logActivity('order', `Pesanan baru ${idPesanan} (template admin): ${rp(totalKeseluruhan)}. QRIS terkirim.`);
     return tg.sendMessage(chatId, `✅ Sukses! QRIS terkirim untuk *${idPesanan}*.`, MD);
   } catch { return tg.sendMessage(chatId, '❌ Error jaringan saat menghubungi API.'); }
+}
+
+// ---------- FITUR ADMIN: Dashboard omset ----------
+function wibDayStart(offsetDays = 0) {
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jakarta' }));
+  now.setDate(now.getDate() + offsetDays);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}T00:00:00+07:00`;
+}
+function wibMonthStart() {
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jakarta' }));
+  const p = (n) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-01T00:00:00+07:00`;
+}
+async function handleDashboard(chatId, msgId = null) {
+  const send = msgId
+    ? (t, o) => tg.editMessageText(chatId, msgId, t, { ...MD, ...(o || {}) })
+    : (t, o) => tg.sendMessage(chatId, t, { ...MD, ...(o || {}) });
+  await send('⏳ _Menghitung dashboard..._');
+  try {
+    const rows = await sbGet('orders', { select: 'tanggal,total_harga,status', order: 'tanggal.desc', limit: 2000 });
+    const valid = rows.filter((o) => o.status !== 'batal');
+    const sum = (list) => list.reduce((a, o) => a + Number(o.total_harga || 0), 0);
+    const gte = (iso) => valid.filter((o) => o.tanggal >= iso);
+    const hariIni = gte(wibDayStart(0));
+    const mingguIni = gte(wibDayStart(-6));
+    const bulanIni = gte(wibMonthStart());
+    const cnt = (s) => valid.filter((o) => o.status === s).length;
+    // Rata-rata order/hari bulan ini
+    const tgl = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jakarta' }));
+    const hariBerjalan = Math.max(1, tgl.getDate());
+    const rataHari = Math.round(sum(bulanIni) / hariBerjalan);
+    // Pengeluaran hari ini (untuk profit)
+    let keluarHari = 0;
+    try {
+      const k = await sbGet('pengeluaran', { select: 'nominal', tanggal: `gte.${wibDayStart(0)}`, limit: 500 });
+      keluarHari = k.reduce((a, x) => a + Number(x.nominal || 0), 0);
+    } catch {}
+    const namaBulan = tgl.toLocaleDateString('id-ID', { month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
+    const tglStr = tgl.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Jakarta' });
+    const txt =
+      `📊 *DASHBOARD OMSET*\n🗓️ ${tglStr}\n\n` +
+      `💰 *Hari ini:* ${rp(sum(hariIni))} (${hariIni.length} order)\n` +
+      `💰 *7 hari terakhir:* ${rp(sum(mingguIni))} (${mingguIni.length} order)\n` +
+      `💰 *Bulan ${namaBulan}:* ${rp(sum(bulanIni))} (${bulanIni.length} order)\n` +
+      `📉 *Rata-rata:* ${rp(rataHari)}/hari\n\n` +
+      `🚦 *Status pesanan:*\n` +
+      `🔴 Belum bayar: ${cnt('pending')}\n` +
+      `⚙️ Diproses: ${cnt('diproses')}\n` +
+      `🚚 Dikirim: ${cnt('dikirim')}\n` +
+      `🥰 Selesai: ${cnt('selesai')}\n\n` +
+      `💸 Pengeluaran hari ini: ${rp(keluarHari)}\n` +
+      `💵 *Profit hari ini:* ${rp(sum(hariIni) - keluarHari)}`;
+    await send(txt, kb(BACK_HOME));
+    await logActivity('dashboard', 'Dashboard omset dibuka.');
+  } catch (e) {
+    await send(`❌ Gagal hitung dashboard: ${e.message}`);
+  }
+}
+
+// ---------- FITUR ADMIN: Catat pengeluaran ----------
+async function handleKeluar(chatId, text) {
+  const arg = text.replace(/^\/keluar\s*/i, '').trim();
+  if (!arg) {
+    return tg.sendMessage(chatId,
+      '💸 *CATAT PENGELUARAN*\n\nFormat:\n`/keluar 50000 beli tinta`\n`/keluar 25000|parkir`\n\nLihat rekap: /rekap', MD);
+  }
+  let nominalRaw, ket;
+  if (arg.includes('|')) { [nominalRaw, ket] = arg.split('|').map((s) => s.trim()); }
+  else {
+    const parts = arg.split(/\s+/);
+    nominalRaw = parts.shift();
+    ket = parts.join(' ');
+  }
+  const nominal = Number(String(nominalRaw).replace(/[^0-9]/g, '')) || 0;
+  if (!nominal) return tg.sendMessage(chatId, '❌ Nominal tidak valid. Contoh: `/keluar 50000 beli tinta`', MD);
+  try {
+    await sbPost('pengeluaran', [{ nominal, keterangan: ket || '-' }], 'return=minimal');
+    await logActivity('pengeluaran', `Keluar ${rp(nominal)}: ${ket || '-'}`);
+    return tg.sendMessage(chatId, `✅ *Pengeluaran tercatat*\n\n💸 ${rp(nominal)}\n📝 ${ket || '-'}\n\nLihat rekap: /rekap`, MD);
+  } catch (e) {
+    return tg.sendMessage(chatId, `❌ Gagal simpan: ${e.message}\n\nPastikan tabel *pengeluaran* sudah dibuat (jalankan migrasi SQL).`, MD);
+  }
+}
+
+// ---------- FITUR ADMIN: Rekap pengeluaran ----------
+async function handleRekap(chatId, msgId = null) {
+  const send = msgId
+    ? (t, o) => tg.editMessageText(chatId, msgId, t, { ...MD, ...(o || {}) })
+    : (t, o) => tg.sendMessage(chatId, t, { ...MD, ...(o || {}) });
+  try {
+    const rows = await sbGet('pengeluaran', { select: 'tanggal,nominal,keterangan', order: 'tanggal.desc', limit: 500 });
+    const sum = (list) => list.reduce((a, x) => a + Number(x.nominal || 0), 0);
+    const gte = (iso) => rows.filter((x) => x.tanggal >= iso);
+    const hari = gte(wibDayStart(0));
+    const minggu = gte(wibDayStart(-6));
+    const bulan = gte(wibMonthStart());
+    const fmtRow = (x) => {
+      const d = new Date(x.tanggal).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', timeZone: 'Asia/Jakarta' });
+      return `• ${d} — ${rp(x.nominal)} (${x.keterangan || '-'})`;
+    };
+    const txt =
+      `💸 *REKAP PENGELUARAN*\n\n` +
+      `📅 Hari ini: *${rp(sum(hari))}*\n` +
+      `📅 7 hari: *${rp(sum(minggu))}*\n` +
+      `📅 Bulan ini: *${rp(sum(bulan))}*\n\n` +
+      `*5 terakhir:*\n${rows.slice(0, 5).map(fmtRow).join('\n') || '-'}`;
+    await send(txt, kb(BACK_HOME));
+  } catch (e) {
+    await send(`❌ Gagal: ${e.message}\n\nPastikan tabel *pengeluaran* sudah dibuat (jalankan migrasi SQL).`);
+  }
+}
+
+// ---------- FITUR ADMIN: Export CSV ----------
+function csvEsc(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+async function handleExport(chatId, kind) {
+  const wait = await tg.sendMessage(chatId, '⏳ _Menyiapkan file export..._', MD);
+  try {
+    let csv = '', fname = '';
+    if (kind === 'orders') {
+      const rows = await sbGet('orders', { select: 'id,tanggal,nama_penerima,nomor_wa,alamat_lengkap,total_harga,status,nomor_resi', order: 'tanggal.desc', limit: 2000 });
+      csv = 'ID,Tanggal,Nama,No WA,Alamat,Total,Status,Resi\n';
+      for (const o of rows) {
+        csv += [o.id, fmtTgl(o.tanggal), o.nama_penerima, o.nomor_wa, o.alamat_lengkap, o.total_harga, o.status, o.nomor_resi || '']
+          .map(csvEsc).join(',') + '\n';
+      }
+      fname = `export-orders-${Date.now()}.csv`;
+    } else if (kind === 'products') {
+      const rows = await sbGet('products', { select: 'id,nama,kategori,harga,stok', order: 'id', limit: 500 });
+      csv = 'ID,Nama,Kategori,Harga,Stok\n';
+      for (const p of rows) csv += [p.id, p.nama, p.kategori || '', p.harga, p.stok ?? ''].map(csvEsc).join(',') + '\n';
+      fname = `export-products-${Date.now()}.csv`;
+    } else {
+      const rows = await sbGet('customers', { select: 'nama,nomor_wa,alamat_lengkap', order: 'nama', limit: 2000 });
+      csv = 'Nama,No WA,Alamat\n';
+      for (const c of rows) csv += [c.nama, c.nomor_wa, c.alamat_lengkap || ''].map(csvEsc).join(',') + '\n';
+      fname = `export-customers-${Date.now()}.csv`;
+    }
+    await tg.sendDocument(chatId, Buffer.from(csv, 'utf8'), fname, `📥 Export ${kind} (${csv.split('\n').length - 2} baris)`);
+    await tg.deleteMessage(chatId, wait.message_id).catch(() => {});
+    await logActivity('export', `Export ${kind} dikirim ke admin.`);
+  } catch (e) {
+    await tg.editMessageText(chatId, wait.message_id, `❌ Gagal export: ${e.message}`, MD).catch(() => {});
+  }
 }
 
 module.exports = { showHome, handleCallback, handleMessage, getAdminState, setAdminState, clearAdminState, queueWA, getProfile };
