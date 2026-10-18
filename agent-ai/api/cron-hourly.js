@@ -6,7 +6,7 @@
  *  2) Follow-up 30 hari: promo ke customer lama (anti-dobel via followup_log).
  * Port dari interval bot lama. Auth: Authorization: Bearer CRON_SECRET.
  */
-const { sendMessage } = require('../../lib/telegram-api');
+const { sendMessage, sendDocument } = require('../../lib/telegram-api');
 
 const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SB_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -161,6 +161,52 @@ module.exports = async (req, res) => {
         await sendMessage(OWNER_ID,
           `⏰ *${out.reminder} pengingat bayar* terkirim via WA.`,
           { parse_mode: 'Markdown' }).catch(() => {});
+      }
+    }
+
+    // ---- 4) FITUR ADMIN: Alert stok menipis (1x sehari, anti-dobel) ----
+    {
+      out.stokAlert = 0;
+      const wibNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jakarta' }));
+      const p2 = (n) => String(n).padStart(2, '0');
+      const todayKey = `${wibNow.getFullYear()}-${p2(wibNow.getMonth() + 1)}-${p2(wibNow.getDate())}`;
+      const r = await fetch(`${SB_URL}/rest/v1/products?select=id,nama,stok&stok=lt.10&order=stok.asc&limit=50`, { headers: H });
+      const rows = r.ok ? await r.json() : [];
+      if (rows.length && OWNER_ID) {
+        const cek = await fetch(`${SB_URL}/rest/v1/agent_activity?aksi=eq.stok_alert_${todayKey}&limit=1`, { headers: H });
+        const cj = cek.ok ? await cek.json() : [];
+        if (!cj.length) {
+          const list = rows.map((x) => `• *${x.id}* — ${x.nama} (sisa ${x.stok ?? 0})`).join('\n');
+          await sendMessage(OWNER_ID,
+            `⚠️ *STOK MENIPIS*\n\n${list}\n\nSegera restock ya!`,
+            { parse_mode: 'Markdown' }).catch(() => {});
+          await fetch(`${SB_URL}/rest/v1/agent_activity`, {
+            method: 'POST', headers: { ...H, Prefer: 'return=minimal' },
+            body: JSON.stringify([{ kategori: 'toko', aksi: `stok_alert_${todayKey}`, detail: `${rows.length} produk stok < 10` }]),
+          }).catch(() => {});
+          out.stokAlert = rows.length;
+        }
+      }
+    }
+
+    // ---- 5) FITUR ADMIN: Backup otomatis tiap Senin ----
+    {
+      out.backup = 0;
+      const wibNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jakarta' }));
+      if (wibNow.getDay() === 1 && OWNER_ID) { // 1 = Senin
+        try {
+          const dump = { tanggal: new Date().toISOString(), tabel: {} };
+          for (const t of ['orders', 'products', 'customers']) {
+            const rr = await fetch(`${SB_URL}/rest/v1/${t}?select=*&limit=5000`, { headers: H });
+            dump.tabel[t] = rr.ok ? await rr.json() : [];
+          }
+          const p2 = (n) => String(n).padStart(2, '0');
+          const fname = `backup-toko-${wibNow.getFullYear()}${p2(wibNow.getMonth() + 1)}${p2(wibNow.getDate())}.json`;
+          await sendDocument(OWNER_ID, Buffer.from(JSON.stringify(dump, null, 2), 'utf8'), fname,
+            `💾 *Backup mingguan toko*\nOrders: ${dump.tabel.orders.length} | Products: ${dump.tabel.products.length} | Customers: ${dump.tabel.customers.length}`)
+            .catch(() => {});
+          out.backup = 1;
+        } catch (e) { console.error('[cron] backup gagal:', e.message); }
       }
     }
 
