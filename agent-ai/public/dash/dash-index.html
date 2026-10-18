@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>📊 Dashboard — Digiprint</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  .status-pending { background:#fef3c7; color:#92400e; }
+  .status-diproses { background:#dbeafe; color:#1e40af; }
+  .status-dikirim { background:#e0e7ff; color:#3730a3; }
+  .status-selesai { background:#d1fae5; color:#065f46; }
+  .status-batal { background:#fee2e2; color:#991b1b; }
+  .stok-rendah { color:#dc2626; font-weight:700; }
+</style>
+</head>
+<body class="bg-slate-100 min-h-screen">
+
+<!-- ===== LOGIN ===== -->
+<div id="login" class="min-h-screen flex items-center justify-center p-4">
+  <div class="bg-white rounded-2xl shadow-lg p-8 w-full max-w-sm">
+    <h1 class="text-2xl font-bold text-center mb-1">📊 Dashboard</h1>
+    <p class="text-slate-500 text-center text-sm mb-6">Digiprint — masukkan PIN</p>
+    <input id="pinInput" type="password" inputmode="numeric" placeholder="PIN"
+      class="w-full border rounded-xl px-4 py-3 text-center text-xl tracking-widest mb-3 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    <button id="loginBtn" class="w-full bg-indigo-600 text-white rounded-xl py-3 font-semibold hover:bg-indigo-700">Masuk</button>
+    <p id="loginErr" class="text-red-600 text-sm text-center mt-3 hidden">PIN salah, coba lagi.</p>
+  </div>
+</div>
+
+<!-- ===== DASHBOARD ===== -->
+<div id="dash" class="hidden max-w-6xl mx-auto p-4 pb-12">
+  <div class="flex items-center justify-between mb-4">
+    <h1 class="text-xl font-bold">📊 Dashboard Digiprint</h1>
+    <button id="refreshBtn" class="text-sm bg-white border rounded-lg px-3 py-1.5 shadow-sm">🔄 Refresh</button>
+  </div>
+
+  <!-- Kartu omset -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+    <div class="bg-white rounded-xl shadow p-4">
+      <p class="text-xs text-slate-500">Omset Hari Ini</p>
+      <p id="omHari" class="text-lg font-bold text-indigo-700">–</p>
+    </div>
+    <div class="bg-white rounded-xl shadow p-4">
+      <p class="text-xs text-slate-500">Omset 7 Hari</p>
+      <p id="omMinggu" class="text-lg font-bold text-indigo-700">–</p>
+    </div>
+    <div class="bg-white rounded-xl shadow p-4">
+      <p class="text-xs text-slate-500">Omset Bulan Ini</p>
+      <p id="omBulan" class="text-lg font-bold text-indigo-700">–</p>
+    </div>
+    <div class="bg-white rounded-xl shadow p-4">
+      <p class="text-xs text-slate-500">Total Order (30 hr)</p>
+      <p id="totOrder" class="text-lg font-bold text-indigo-700">–</p>
+    </div>
+  </div>
+
+  <!-- Grafik -->
+  <div class="bg-white rounded-xl shadow p-4 mb-4">
+    <h2 class="font-semibold mb-2">📈 Penjualan 7 Hari Terakhir</h2>
+    <div class="h-56"><canvas id="chartOmset"></canvas></div>
+  </div>
+
+  <!-- Order terbaru -->
+  <div class="bg-white rounded-xl shadow p-4 mb-4 overflow-x-auto">
+    <h2 class="font-semibold mb-2">🧾 10 Order Terbaru</h2>
+    <table class="w-full text-sm">
+      <thead><tr class="text-left text-slate-500 border-b">
+        <th class="py-2 pr-2">ID</th><th class="pr-2">Nama</th><th class="pr-2">Total</th><th>Status</th>
+      </tr></thead>
+      <tbody id="orderRows"></tbody>
+    </table>
+  </div>
+
+  <!-- Produk -->
+  <div class="bg-white rounded-xl shadow p-4 overflow-x-auto">
+    <h2 class="font-semibold mb-2">📦 Produk & Stok</h2>
+    <table class="w-full text-sm">
+      <thead><tr class="text-left text-slate-500 border-b">
+        <th class="py-2 pr-2">Produk</th><th class="pr-2">Harga</th><th>Stok</th>
+      </tr></thead>
+      <tbody id="prodRows"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const rp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
+let PIN = sessionStorage.getItem('dash_pin') || '';
+let chart = null;
+
+const STATUS_LABEL = { pending:'Belum Bayar', diproses:'Diproses', dikirim:'Dikirim', selesai:'Selesai', batal:'Batal' };
+
+async function load() {
+  const r = await fetch('/api/dash-data?pin=' + encodeURIComponent(PIN));
+  if (r.status === 401) { showLogin(true); return; }
+  const d = await r.json();
+  if (!d.ok) { alert('Gagal: ' + d.error); return; }
+  showLogin(false);
+  render(d);
+}
+
+function showLogin(bad) {
+  document.getElementById('login').classList.toggle('hidden', !bad && !!PIN);
+  document.getElementById('dash').classList.toggle('hidden', bad || !PIN);
+  if (bad) document.getElementById('loginErr').classList.remove('hidden');
+}
+
+function render(d) {
+  document.getElementById('omHari').textContent = rp(d.omset.hariIni);
+  document.getElementById('omMinggu').textContent = rp(d.omset.mingguIni);
+  document.getElementById('omBulan').textContent = rp(d.omset.bulanIni);
+  document.getElementById('totOrder').textContent = d.omset.totalOrder + ' (' + d.omset.orderHariIni + ' hari ini)';
+
+  // Grafik
+  const ctx = document.getElementById('chartOmset');
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: d.grafik.map(g => g.tanggal),
+      datasets: [{ label: 'Omset (Rp)', data: d.grafik.map(g => g.total),
+        backgroundColor: 'rgba(79,70,229,.7)', borderRadius: 6 }]
+    },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { y: { ticks: { callback: v => (v/1000) + 'rb' } } } }
+  });
+
+  // Order
+  document.getElementById('orderRows').innerHTML = d.orders.map(o => `
+    <tr class="border-b last:border-0">
+      <td class="py-2 pr-2 font-mono text-xs">${o.id}</td>
+      <td class="pr-2">${esc(o.nama)}</td>
+      <td class="pr-2">${rp(o.total)}</td>
+      <td><span class="status-${o.status} text-xs px-2 py-0.5 rounded-full">${STATUS_LABEL[o.status] || o.status}</span></td>
+    </tr>`).join('') || '<tr><td colspan="4" class="py-3 text-center text-slate-400">Belum ada order</td></tr>';
+
+  // Produk
+  document.getElementById('prodRows').innerHTML = d.products.map(p => `
+    <tr class="border-b last:border-0">
+      <td class="py-2 pr-2">${esc(p.nama)}</td>
+      <td class="pr-2">${rp(p.harga)}</td>
+      <td class="${p.stok < 10 ? 'stok-rendah' : ''}">${p.stok}${p.stok < 10 ? ' ⚠️' : ''}</td>
+    </tr>`).join('');
+}
+
+function esc(s) { return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+document.getElementById('loginBtn').onclick = tryLogin;
+document.getElementById('pinInput').addEventListener('keydown', e => { if (e.key === 'Enter') tryLogin(); });
+async function tryLogin() {
+  PIN = document.getElementById('pinInput').value.trim();
+  document.getElementById('loginErr').classList.add('hidden');
+  const r = await fetch('/api/dash-data?pin=' + encodeURIComponent(PIN));
+  if (r.status === 401) { showLogin(true); return; }
+  sessionStorage.setItem('dash_pin', PIN);
+  load();
+}
+document.getElementById('refreshBtn').onclick = load;
+
+// Auto-login bila PIN tersimpan
+if (PIN) load();
+</script>
+</body>
+</html>
