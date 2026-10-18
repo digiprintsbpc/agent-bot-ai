@@ -888,6 +888,7 @@ const LOUNGE_PADS = [];
   frame.position.y = 1.7;
   const board = mesh(new THREE.PlaneGeometry(2.05, 1.15), mat('#ffffff', 0.15), { cast: false });
   board.position.set(0, 1.7, 0.03);
+  board.userData.isWhiteboard = true; // bisa diklik untuk lihat detail
   wb.add(frame, board);
   // coretan di whiteboard
   const wbTex = canvasTex(512, 288);
@@ -1380,7 +1381,7 @@ function buildDesk(def) {
   plate.position.set(0.55, 0.81, 0.46);
   plate.rotation.x = -0.6;
   desk.add(plate);
-  const lamp = new THREE.PointLight('#ffd9a0', 0, 5, 2);
+  const lamp = new THREE.PointLight('#eaf2ff', 0, 5, 2);
   lamp.position.set(0, 1.9, 0.3);
   desk.add(lamp);
   const seat = new THREE.Group();
@@ -1483,7 +1484,30 @@ const CHAT = [
 // ---------------------------------------------------------------- aktor (Ketua, tim, freelancer)
 const actors = new Map();
 const pickables = [];
+const objPickables = []; // objek non-aktor yang bisa diklik (monitor, whiteboard)
 const tmpV = new THREE.Vector3();
+
+// Tandai monitor tiap meja sebagai clickable (setelah desks dibangun)
+function tagMonitors() {
+  for (const [id, d] of Object.entries(desks)) {
+    for (const m of [d.main, d.side]) {
+      if (!m?.g) continue;
+      m.g.traverse((o) => {
+        if (o.isMesh && o.geometry?.type === 'PlaneGeometry') {
+          o.userData.objKey = 'screen-' + id;
+          objPickables.push(o);
+        }
+      });
+    }
+  }
+  // Whiteboard: cari mesh papan tulis
+  scene.traverse((o) => {
+    if (o.isMesh && o.userData.isWhiteboard) {
+      o.userData.objKey = 'whiteboard';
+      objPickables.push(o);
+    }
+  });
+}
 function guitarMesh() {
   const g = new THREE.Group();
   const wood = mat('#b5703a', 0.5);
@@ -2312,17 +2336,59 @@ renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX
 renderer.domElement.addEventListener('pointerup', (e) => {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
   const hit = pick(e);
-  if (hit?.userData.key) focusOn(hit.userData.key);
+  if (hit?.userData.objKey) showObjPopup(hit.userData.objKey);
+  else if (hit?.userData.key) focusOn(hit.userData.key);
 });
 renderer.domElement.addEventListener('pointermove', (e) => {
   if (e.pointerType !== 'mouse') return;
-  renderer.domElement.style.cursor = pick(e)?.userData.key ? 'pointer' : '';
+  const hit = pick(e);
+  renderer.domElement.style.cursor = (hit?.userData.key || hit?.userData.objKey) ? 'pointer' : '';
 });
 function pick(e) {
   if (!HAS_GL) return null;
   pointer.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(pointer, camera);
-  return ray.intersectObjects(pickables, false)[0]?.object || null;
+  const hitActor = ray.intersectObjects(pickables, false)[0]?.object || null;
+  if (hitActor) return hitActor;
+  return ray.intersectObjects(objPickables, false)[0]?.object || null;
+}
+
+// Popup detail objek (komputer / whiteboard)
+function showObjPopup(objKey) {
+  const popup = document.getElementById('objPopup');
+  const title = document.getElementById('objTitle');
+  const content = document.getElementById('objContent');
+  if (!popup) return;
+
+  if (objKey.startsWith('screen-')) {
+    const deskId = objKey.slice(7);
+    const d = desks[deskId];
+    const who = d?.who;
+    const name = who?.name || d?.plate?.name || ('Meja ' + deskId);
+    const role = deskId === 'A0' ? 'Ketua' : (who ? 'Tim' : '—');
+    const state = who ? (who.state === 'bekerja' ? 'bekerja' : 'santai') : 'kosong';
+    title.textContent = '💻 Komputer — ' + name;
+    content.innerHTML = `<div class="obj-screen-info">
+      <div class="row"><b>Pengguna</b><span>${name} (${role})</span></div>
+      <div class="row"><b>Status</b><span class="obj-status ${state === 'bekerja' ? 'work' : 'idle'}">${state === 'bekerja' ? '● Bekerja' : state === 'santai' ? '○ Santai' : '○ Kosong'}</span></div>
+      <div class="row"><b>Aktivitas</b><span>${who?.activity || who?.task || '—'}</span></div>
+      <div class="row"><b>Meja</b><span>${deskId}</span></div>
+    </div>
+    <p style="margin:12px 0 0;color:var(--muted);font-size:12px">Layar menampilkan aplikasi kerja aktif. Data live dari sistem.</p>`;
+  } else if (objKey === 'whiteboard') {
+    title.textContent = '📋 Whiteboard — Target Q4';
+    content.innerHTML = `<div class="obj-screen-info">
+      <div class="row"><b>Isi</b><span>Grafik target kuartal Q4, daftar tugas tim, dan catatan rapat.</span></div>
+      <div class="row"><b>Update</b><span>Otomatis dari aktivitas tim</span></div>
+    </div>`;
+  } else {
+    return;
+  }
+  popup.hidden = false;
+}
+function hideObjPopup() {
+  const popup = document.getElementById('objPopup');
+  if (popup) popup.hidden = true;
 }
 function onResize() {
   camera.aspect = innerWidth / innerHeight;
@@ -2487,6 +2553,13 @@ document.fonts?.ready.then(() => {
 }).catch(() => {});
 frame();
 poll();
+// Tandai monitor & whiteboard sebagai clickable + handler popup
+tagMonitors();
+document.getElementById('objClose')?.addEventListener('click', hideObjPopup);
+document.getElementById('objPopup')?.addEventListener('click', (e) => {
+  if (e.target.id === 'objPopup') hideObjPopup();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideObjPopup(); });
 setTimeout(() => {
   $('loading').classList.add('gone');
   setTimeout(() => $('loading').remove(), 900);
