@@ -490,6 +490,27 @@ async function handleMessage(chatId, msg) {
     const invMatch = text.match(/^\/invoice\s+(INV-\d{6})/i);
     if (invMatch) return handleInvoice(chatId, invMatch[1].toUpperCase());
 
+    // ===== HAPUS ORDER =====
+    const hapusMatch = text.match(/^\/hapus\s+(INV-\d{6})(\s+YA)?/i);
+    if (hapusMatch) {
+      const delId = hapusMatch[1].toUpperCase();
+      const confirmed = !!hapusMatch[2];
+      if (!confirmed) {
+        // Tampilkan detail dulu, minta konfirmasi
+        const rows = await sbGet('orders', { select: 'id,nama_penerima,total_harga,status', id: `eq.${delId}`, limit: 1 }).catch(() => []);
+        if (!rows[0]) return tg.sendMessage(chatId, `❌ Order *${delId}* tidak ditemukan.`, MD);
+        const o = rows[0];
+        return tg.sendMessage(chatId,
+          `⚠️ *HAPUS ORDER?*\n\nID: ${o.id}\nCustomer: ${o.nama_penerima}\nTotal: Rp ${Number(o.total_harga || 0).toLocaleString('id-ID')}\nStatus: ${o.status}\n\nKetik \`/hapus ${delId} YA\` untuk hapus permanen.`,
+          MD);
+      }
+      // Hapus order_items dulu, baru orders
+      await sbDel('order_items', { order_id: `eq.${delId}` }).catch(() => {});
+      await sbDel('orders', { id: `eq.${delId}` }).catch(() => {});
+      await logActivity('hapus', `Order ${delId} dihapus via /hapus.`);
+      return tg.sendMessage(chatId, `✅ Order *${delId}* dihapus.`, MD);
+    }
+
     // ===== FITUR JUALAN: /broadcast =====
     if (text.startsWith('/broadcast ')) {
       const pesan = text.substring(11).trim();
