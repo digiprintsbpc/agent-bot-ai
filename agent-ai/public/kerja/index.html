@@ -228,6 +228,30 @@ body.lapang .cards { opacity: .92; }
 
 <div class="cards" id="cards" aria-label="Karakter"></div>
 
+<!-- Popup interaktif untuk klik objek (komputer, whiteboard) -->
+<div id="objPopup" class="obj-popup" hidden>
+  <div class="obj-popup-card card-ui">
+    <button type="button" class="obj-close" id="objClose" aria-label="Tutup">×</button>
+    <h3 id="objTitle">Detail</h3>
+    <div id="objContent"></div>
+  </div>
+</div>
+
+<style>
+.obj-popup { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; background: rgba(20, 24, 32, .45); backdrop-filter: blur(4px); }
+.obj-popup[hidden] { display: none !important; }
+.obj-popup-card { position: relative; max-width: 520px; width: calc(100% - 32px); max-height: 80vh; overflow: auto; padding: 20px 22px; }
+.obj-popup-card h3 { margin: 0 0 12px; font-size: 16px; }
+.obj-close { position: absolute; top: 10px; right: 12px; border: 0; background: none; font-size: 24px; cursor: pointer; color: var(--muted); line-height: 1; }
+.obj-close:hover { color: var(--text); }
+.obj-screen-info { display: grid; gap: 8px; font-size: 13px; }
+.obj-screen-info .row { display: flex; gap: 8px; }
+.obj-screen-info .row b { min-width: 90px; color: var(--muted); font-weight: 600; }
+.obj-status { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+.obj-status.work { background: #e6f7ec; color: #1f9d57; }
+.obj-status.idle { background: #f0ede8; color: #8a8378; }
+</style>
+
 <script>window.KANTOR = {"title":"Digiprint Agent AI","ketua":"Lexa","team":["Ngobrol","Toko","Security","Catatan"],"colors":{"ketua":"#6a55c9","team":["#3f6fd1","#2f9a6d","#d9772f","#c2417a"],"freelancers":[]},"spare_desks":0};</script>
 <script type="module" src="/kerja/assets/kantor.js?v=100"></script>
 </body>
