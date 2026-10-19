@@ -669,6 +669,45 @@ async function handleMessage(chatId, msg) {
       return true;
     }
 
+    // ===== Minta form/template order via bahasa natural =====
+    // Cth: "minta formnya", "ada yang mau pesan 2 produk minta form"
+    // Template diambil dari database (tabel templates), bisa diedit via Supabase
+    const formMatch = text.match(/minta\s+(form|template|formulir)|form.*pesan|template.*order/i);
+    if (formMatch) {
+      // Cari angka jumlah produk (default 1)
+      const numMatch = text.match(/(\d+)\s*(produk|item|pesanan)/i);
+      const count = numMatch ? Math.min(10, Math.max(1, parseInt(numMatch[1], 10))) : 1;
+      // Ambil template dari database
+      let template = null;
+      try {
+        const rows = await sbGet('templates', { select: 'isi', id: 'eq.order_form', limit: 1 });
+        if (rows[0]) template = rows[0].isi;
+      } catch (e) { console.error('[template] gagal ambil:', e.message); }
+      // Fallback jika tabel belum ada
+      if (!template) {
+        template = `📋 *TEMPLATE ORDER*\nNama Penerima: \nNomor wa Penerima: \nAlamat lengkap: \nDetail Pesanan 1\nNama Produk: \nqty: \nHarga satuan: `;
+      }
+      // Jika minta >1 produk, duplikat bagian detail
+      let txt = template;
+      if (count > 1) {
+        const detailRe = /Detail Pesanan \d+\nNama Produk: \nqty: \nHarga satuan: */;
+        const m = template.match(detailRe);
+        if (m) {
+          for (let i = 2; i <= count; i++) {
+            txt += `\nDetail Pesanan ${i}\nNama Produk: \nqty: \nHarga satuan: `;
+          }
+        } else {
+          // Fallback: tambah manual jika format beda
+          for (let i = 2; i <= count; i++) {
+            txt += `\nDetail Pesanan ${i}\nNama Produk: \nqty: \nHarga satuan: `;
+          }
+        }
+      }
+      txt += `\n\n_Salin, isi, lalu kirim kembali ke sini._`;
+      await tg.sendMessage(chatId, txt, MD);
+      return true;
+    }
+
     return null; // teks bebas → asisten AI
   }
 
