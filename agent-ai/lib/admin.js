@@ -166,7 +166,13 @@ async function queueWA(toWa, kind, content, caption, imageUrl) {
     to_wa: formatWA(toWa), kind, content, caption: caption || null, status: 'pending',
   };
   if (imageUrl) row.image_url = imageUrl;
-  await sbPost('wa_outbox', [row], 'return=minimal').catch((e) => console.error('[admin] queueWA gagal:', e.message));
+  try {
+    await sbPost('wa_outbox', [row], 'return=minimal');
+    return true;
+  } catch (e) {
+    console.error('[admin] queueWA gagal:', e.message);
+    return false;
+  }
 }
 async function logActivity(aksi, detail) {
   sbPost('agent_activity', [{ kategori: 'toko', aksi, detail: String(detail || '').slice(0, 500) }], 'return=minimal').catch(() => {});
@@ -208,7 +214,7 @@ async function renderMassalMenu(chatId, msgId, state) {
 function renderOrderQtyMenu(chatId, messageId, count) {
   return tg.editMessageText(chatId, messageId, `🛍 *Total Produk: ${count}*`, {
     ...MD, ...kb([
-      [{ text: '➖', callback_data: `oqty_dec_${count}` }, { text: '📝 Generate Form', callback_data: `oqty_gen_${count}` }, { text: '➕', callback_data: `oqty_inc_${count}` }],
+      [{ text: '-', callback_data: `oqty_dec_${count}` }, { text: '📝 Generate Form', callback_data: `oqty_gen_${count}` }, { text: '+', callback_data: `oqty_inc_${count}` }],
       [{ text: '🔙 Kembali', callback_data: 'home' }],
     ]),
   });
@@ -1050,7 +1056,8 @@ async function handleInvoice(chatId, orderId) {
     const items = await sbGet('order_items', {
       select: 'nama_produk,qty,harga_satuan', order_id: `eq.${orderId}`,
     }).catch(() => []);
-    const pdfBuffer = await generateInvoice({ ...orders[0], items });
+    const profile = await getProfile().catch(() => ({}));
+    const pdfBuffer = await generateInvoice({ ...orders[0], items, _profile: profile });
 
     // Upload ke Storage untuk dapat link publik
     let publicUrl = null;
@@ -1097,7 +1104,8 @@ async function handleInvoiceToWA(chatId, orderId) {
     const items = await sbGet('order_items', {
       select: 'nama_produk,qty,harga_satuan', order_id: `eq.${orderId}`,
     }).catch(() => []);
-    const pdfBuffer = await generateInvoice({ ...order, items });
+    const profile2 = await getProfile().catch(() => ({}));
+    const pdfBuffer = await generateInvoice({ ...order, items, _profile: profile2 });
 
     const fileName = `Invoice-${orderId}-${Date.now()}.pdf`;
     const upRes = await fetch(`${SB_URL}/storage/v1/object/invoices/${fileName}`, {
@@ -1320,10 +1328,14 @@ async function handleTemplateOrder(chatId, text) {
       const q = parseInt(qty[i][1], 10) || 0; const h = parseInt(String(hrg[i][1]).replace(/[^0-9]/g, ''), 10) || 0;
       await sbPost('order_items', [{ order_id: idPesanan, nama_produk: prod[i][1].trim(), qty: q, harga_satuan: h }], 'return=minimal').catch(() => {});
     }
-    await queueWA(nowa, 'image', qris.qr_image_url,
+    const qrisOk = await queueWA(nowa, 'image', qris.qr_image_url,
       `Halo kak *${namaPenerima}*!\nID: *${idPesanan}*\n\n${detailStruk}\n*TOTAL: ${rp(totalKeseluruhan)}*\nSilakan scan QRIS untuk membayar.`);
-    await logActivity('order', `Pesanan baru ${idPesanan} (template admin): ${rp(totalKeseluruhan)}. QRIS terkirim.`);
-    await tg.sendMessage(chatId, `✅ Sukses! QRIS terkirim untuk *${idPesanan}*.`, MD);
+    await logActivity('order', `Pesanan baru ${idPesanan} (template admin): ${rp(totalKeseluruhan)}. QRIS ${qrisOk ? 'terkirim' : 'GAGAL dikirim'}.`);
+    if (qrisOk) {
+      await tg.sendMessage(chatId, `✅ Sukses! QRIS terkirim untuk *${idPesanan}*.`, MD);
+    } else {
+      await tg.sendMessage(chatId, `⚠️ Order *${idPesanan}* tersimpan, tapi QRIS *gagal* dikirim ke WA. Cek koneksi database lalu kirim manual.`, MD);
+    }
   } catch {
     await tg.sendMessage(chatId, '❌ Error jaringan saat menghubungi API.');
   }
