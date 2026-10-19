@@ -169,21 +169,45 @@ async function queueWA(toWa, kind, content, caption, imageUrl) {
   try {
     await sbPost('wa_outbox', [row], 'return=minimal');
     // Kirim log ke bot Telegram khusus log (jika dikonfigurasi)
+    // Kirim konten asli: teks → teks, gambar → gambar, dokumen → dokumen
     try {
       const logToken = process.env.TELEGRAM_LOG_BOT_TOKEN;
       const logChatId = process.env.TELEGRAM_LOG_CHAT_ID || OWNER_ID;
       if (logToken) {
-        const preview = kind === 'text' ? String(content).slice(0, 100) :
-          kind === 'image' ? '🖼️ Gambar' : '📄 Dokumen';
-        await fetch(`https://api.telegram.org/bot${logToken}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            chat_id: logChatId,
-            text: `📤 *WA terkirim*\nKe: \`${row.to_wa}\`\nIsi: ${preview}${caption ? '\nCaption: ' + String(caption).slice(0, 80) : ''}`,
-            parse_mode: 'Markdown',
-          }),
-        }).catch(() => {});
+        const header = `📤 *WA terkirim*\nKe: \`${row.to_wa}\`\n${'-'.repeat(40)}`;
+        if (kind === 'text') {
+          await fetch(`https://api.telegram.org/bot${logToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: logChatId,
+              text: header + '\n' + String(content),
+              parse_mode: 'Markdown',
+            }),
+          }).catch(() => {});
+        } else if (kind === 'image') {
+          await fetch(`https://api.telegram.org/bot${logToken}/sendPhoto`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: logChatId,
+              photo: content,
+              caption: header + (caption ? '\n' + String(caption).slice(0, 200) : ''),
+              parse_mode: 'Markdown',
+            }),
+          }).catch(() => {});
+        } else if (kind === 'document') {
+          await fetch(`https://api.telegram.org/bot${logToken}/sendDocument`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: logChatId,
+              document: content,
+              caption: header + (caption ? '\n' + String(caption).slice(0, 200) : ''),
+              parse_mode: 'Markdown',
+            }),
+          }).catch(() => {});
+        }
       }
     } catch (e) {}
     return true;
