@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Preview Karakter</title>
+<style>body{margin:0;background:#1a1d23;display:flex;justify-content:center;align-items:center;min-height:100vh}canvas{display:block}</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head><body>
+<script>
+// Minimal character preview - extract buildPerson logic
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#1a1d23');
+const camera = new THREE.PerspectiveCamera(45, 1.5, 0.1, 100);
+camera.position.set(0, 1.5, 6);
+camera.lookAt(0, 1, 0);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(900, 600);
+document.body.appendChild(renderer.domElement);
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const dl = new THREE.DirectionalLight(0xffffff, 0.8);
+dl.position.set(3, 5, 3); scene.add(dl);
+
+// Simplified person builder (corporate look)
+function makePerson(shirt, pants, skin, hair, tie) {
+  const g = new THREE.Group();
+  const mat = (c) => new THREE.MeshStandardMaterial({color:c, roughness:0.7});
+  // legs
+  const legG = new THREE.CylinderGeometry(0.07, 0.06, 0.85, 10);
+  for (const s of [-1,1]) {
+    const leg = new THREE.Mesh(legG, mat(pants));
+    leg.position.set(s*0.09, 0.42, 0); g.add(leg);
+    const shoe = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.07, 0.22), mat('#1a1a1a'));
+    shoe.position.set(s*0.09, 0.035, 0.04); g.add(shoe);
+  }
+  // torso (blazer)
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.15, 0.65, 14), mat(shirt));
+  torso.position.y = 1.15; g.add(torso);
+  // white shirt + tie
+  const shirtM = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.4, 0.02), mat('#ffffff'));
+  shirtM.position.set(0, 1.2, 0.14); g.add(shirtM);
+  if (tie) {
+    const tieM = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.3, 0.015), mat('#c9a227'));
+    tieM.position.set(0, 1.15, 0.155); g.add(tieM);
+  }
+  // arms
+  const armG = new THREE.CylinderGeometry(0.05, 0.045, 0.6, 10);
+  for (const s of [-1,1]) {
+    const arm = new THREE.Mesh(armG, mat(shirt));
+    arm.position.set(s*0.23, 1.15, 0); arm.rotation.z = s*0.1; g.add(arm);
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.05, 10, 8), mat(skin));
+    hand.position.set(s*0.26, 0.82, 0); g.add(hand);
+  }
+  // head
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.13, 20, 16), mat(skin));
+  head.position.y = 1.65; head.scale.set(1, 1.15, 1); g.add(head);
+  // hair
+  const hairM = new THREE.Mesh(new THREE.SphereGeometry(0.135, 20, 16, 0, Math.PI*2, 0, Math.PI*0.55), mat(hair));
+  hairM.position.y = 1.67; g.add(hairM);
+  // eyes
+  for (const s of [-1,1]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.018, 8, 8), mat('#1a1a1a'));
+    eye.position.set(s*0.05, 1.66, 0.115); g.add(eye);
+  }
+  // label
+  return g;
+}
+
+const looks = [
+  ['#1f2a44', '#1a1f2e', '#b97d52', '#221a15', 'LEXA'],
+  ['#2c3e5a', '#1e2530', '#c68a5e', '#2a211c', 'Ngobrol'],
+  ['#3a4a5c', '#232a35', '#d6a07a', '#3b2a1f', 'Toko'],
+  ['#2e3b4f', '#1f2632', '#a86e45', '#191310', 'Security'],
+  ['#34455e', '#252c38', '#e0b08a', '#5a3a22', 'Catatan'],
+];
+
+looks.forEach(([shirt, pants, skin, hair, name], i) => {
+  const p = makePerson(shirt, pants, skin, hair, true);
+  p.position.x = (i - 2) * 1.1;
+  scene.add(p);
+});
+
+// ground
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(20, 20), new THREE.MeshStandardMaterial({color:'#2a2e36'}));
+ground.rotation.x = -Math.PI/2; scene.add(ground);
+
+renderer.render(scene, camera);
+</script>
+</body></html>

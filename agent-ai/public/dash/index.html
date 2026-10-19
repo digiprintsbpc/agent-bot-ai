@@ -20,7 +20,9 @@
   .btn-primary { background:#4f46e5; color:#fff; border-radius:.65rem; padding:.65rem 1rem; font-weight:600; font-size:.9rem; }
   .btn-primary:hover { background:#4338ca; }
   .btn-danger { background:#fee2e2; color:#991b1b; border-radius:.5rem; padding:.3rem .7rem; font-size:.75rem; font-weight:600; }
+  .btn-danger:hover { background:#fecaca; }
   .card { background:#fff; border-radius:.9rem; box-shadow:0 1px 3px rgba(0,0,0,.08); padding:1rem; }
+  .ordCheck, #ordCheckAll { width:1rem; height:1rem; accent-color:#4f46e5; cursor:pointer; }
 </style>
 </head>
 <body class="bg-slate-100 min-h-screen">
@@ -83,13 +85,14 @@
       </div>
     </section>
 
-    <!-- ============ TAB 2: BUAT PESANAN ============ -->
+    <!-- ============ TAB 2: BUAT PESANAN (input manual) ============ -->
     <section id="tab-order-baru" class="hidden">
       <div class="card max-w-lg">
         <h2 class="font-semibold mb-3">🛒 Buat Pesanan Baru</h2>
-        <label class="text-xs text-slate-500">Produk</label>
-        <select id="obProduk" class="inp mb-3"></select>
-        <div class="grid grid-cols-2 gap-3 mb-3">
+        <label class="text-xs text-slate-500">Nama produk (custom)</label>
+        <input id="obProdukCustom" class="inp mb-3" placeholder="cth: Nota custom 21x7 2ply">
+        <div class="grid grid-cols-3 gap-3 mb-3">
+          <div><label class="text-xs text-slate-500">Harga satuan</label><input id="obHarga" type="number" min="0" class="inp" placeholder="0"></div>
           <div><label class="text-xs text-slate-500">Qty</label><input id="obQty" type="number" min="1" value="1" class="inp"></div>
           <div><label class="text-xs text-slate-500">Total</label><input id="obTotal" class="inp bg-slate-50" readonly></div>
         </div>
@@ -104,7 +107,7 @@
     <!-- ============ TAB 3: KELOLA ORDER ============ -->
     <section id="tab-orders" class="hidden">
       <div class="card mb-3">
-        <div class="flex gap-2 flex-wrap">
+        <div class="flex gap-2 flex-wrap items-center">
           <select id="ordStatus" class="inp !w-auto text-sm">
             <option value="">Semua status</option>
             <option value="pending">Belum Bayar</option>
@@ -114,12 +117,33 @@
             <option value="batal">Batal</option>
           </select>
           <input id="ordSearch" class="inp !w-auto flex-1 text-sm" placeholder="Cari INV / nama...">
+          <div class="flex gap-1 items-center">
+            <input id="ordDari" type="date" class="inp !w-auto text-sm" title="Dari tanggal">
+            <span class="text-slate-400 text-sm">–</span>
+            <input id="ordSampai" type="date" class="inp !w-auto text-sm" title="Sampai tanggal">
+            <button id="ordTgl" class="btn-primary !py-2 text-sm" title="Terapkan filter tanggal">📅</button>
+          </div>
           <button id="ordCari" class="btn-primary !py-2">Cari</button>
+        </div>
+        <!-- Bulk actions bar -->
+        <div id="bulkBar" class="hidden mt-3 flex gap-2 flex-wrap items-center bg-indigo-50 rounded-lg p-2">
+          <span id="bulkCount" class="text-sm font-semibold text-indigo-800"></span>
+          <select id="bulkStatus" class="inp !w-auto text-sm">
+            <option value="">Pilih status…</option>
+            <option value="pending">Belum Bayar</option>
+            <option value="diproses">Diproses</option>
+            <option value="dikirim">Dikirim</option>
+            <option value="selesai">Selesai</option>
+            <option value="batal">Batal</option>
+          </select>
+          <button id="bulkApply" class="btn-primary !py-2 text-sm">Ubah Status Massal</button>
+          <button id="bulkDel" class="btn-danger !py-2 !text-sm">🗑 Hapus Massal</button>
         </div>
       </div>
       <div class="card overflow-x-auto">
         <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
-          <th class="py-2 pr-2">ID</th><th class="pr-2">Nama</th><th class="pr-2">Total</th><th class="pr-2">Status</th><th>Aksi</th>
+          <th class="py-2 pr-2 w-8"><input type="checkbox" id="ordCheckAll" title="Pilih semua"></th>
+          <th class="pr-2">ID</th><th class="pr-2">Nama</th><th class="pr-2">Total</th><th class="pr-2">Status</th><th>Aksi</th>
         </tr></thead><tbody id="ordRows"></tbody></table>
       </div>
       <div id="ordDetail" class="card mt-3 hidden"></div>
@@ -174,11 +198,12 @@
 const rp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
 let PIN = sessionStorage.getItem('dash_pin') || '';
 let chart = null;
-let PRODUCTS = [];
 const STATUS_LABEL = { pending:'Belum Bayar', diproses:'Diproses', dikirim:'Dikirim', selesai:'Selesai', batal:'Batal' };
 const esc = (s) => String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const api = (path, opt) => fetch(path + (path.includes('?') ? '&' : '?') + 'pin=' + encodeURIComponent(PIN), opt);
 const fmtTgl = (iso) => { try { return new Date(iso).toLocaleDateString('id-ID', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit', timeZone:'Asia/Jakarta' }); } catch { return '-'; } };
+/* tanggal ISO -> YYYY-MM-DD dalam zona WIB (untuk filter tanggal) */
+const wibDate = (iso) => { try { return new Date(iso).toLocaleDateString('en-CA', { timeZone:'Asia/Jakarta' }); } catch { return ''; } };
 
 /* ---------- auth ---------- */
 document.getElementById('loginBtn').onclick = tryLogin;
@@ -199,17 +224,21 @@ function showLogin(bad) {
 document.getElementById('logoutBtn').onclick = () => { sessionStorage.removeItem('dash_pin'); PIN=''; showLogin(false); };
 
 /* ---------- tabs ---------- */
+const TABS = ['dash','order-baru','orders','produk','keuangan'];
 document.querySelectorAll('#tabs .tab-btn').forEach(b => b.onclick = () => {
   document.querySelectorAll('#tabs .tab-btn').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
-  ['dash','order-baru','orders','produk','keuangan'].forEach(t =>
+  TABS.forEach(t =>
     document.getElementById('tab-' + t).classList.toggle('hidden', t !== b.dataset.tab));
   if (b.dataset.tab === 'orders') loadOrders();
   if (b.dataset.tab === 'produk') loadProduk();
   if (b.dataset.tab === 'keuangan') loadKeuangan();
-  if (b.dataset.tab === 'order-baru') loadProdukDropdown();
   window.scrollTo(0, 0);
 });
+function showTab(key) {
+  const btn = document.querySelector('#tabs .tab-btn[data-tab="' + key + '"]');
+  if (btn) btn.click();
+}
 
 /* ---------- TAB 1: dashboard ---------- */
 async function loadDash() {
@@ -240,38 +269,32 @@ async function loadDash() {
 
 /* Navigasi dari dashboard */
 function goToOrder(id) {
-  showTab('order');
-  const s = document.getElementById('koSearch');
-  if (s) { s.value = id; loadKelolaOrder(); }
+  document.getElementById('ordSearch').value = id;
+  document.getElementById('ordDari').value = '';
+  document.getElementById('ordSampai').value = '';
+  showTab('orders');
 }
 function goToProduk() { showTab('produk'); }
 
-/* ---------- TAB 2: buat pesanan ---------- */
-async function loadProdukDropdown() {
-  const r = await api('/api/dash-admin?action=products');
-  const d = await r.json();
-  if (!d.ok) return;
-  PRODUCTS = d.products;
-  const sel = document.getElementById('obProduk');
-  sel.innerHTML = PRODUCTS.map(p => `<option value="${p.id}">${esc(p.nama)} — ${rp(p.harga)}</option>`).join('');
-  updObTotal();
-}
+/* ---------- TAB 2: buat pesanan (input manual) ---------- */
 function updObTotal() {
-  const p = PRODUCTS.find(x => String(x.id) === document.getElementById('obProduk').value);
+  const h = Math.max(0, parseInt(document.getElementById('obHarga').value, 10) || 0);
   const q = Math.max(1, parseInt(document.getElementById('obQty').value, 10) || 1);
-  document.getElementById('obTotal').value = p ? rp(p.harga * q) : '-';
+  document.getElementById('obTotal').value = rp(h * q);
 }
-document.getElementById('obProduk').onchange = updObTotal;
+document.getElementById('obHarga').oninput = updObTotal;
 document.getElementById('obQty').oninput = updObTotal;
 document.getElementById('obSubmit').onclick = async () => {
   const payload = {
-    product_id: document.getElementById('obProduk').value,
+    product_custom: document.getElementById('obProdukCustom').value.trim(),
+    harga: document.getElementById('obHarga').value,
     qty: document.getElementById('obQty').value,
     nama: document.getElementById('obNama').value.trim(),
     wa: document.getElementById('obWa').value.trim(),
     alamat: document.getElementById('obAlamat').value.trim(),
   };
-  if (!payload.nama) return alert('Nama wajib diisi');
+  if (!payload.product_custom) return alert('Nama produk wajib diisi');
+  if (!payload.nama) return alert('Nama penerima wajib diisi');
   const res = document.getElementById('obResult');
   res.classList.remove('hidden'); res.textContent = '⏳ Menyimpan...';
   const r = await api('/api/dash-admin?action=create-order', {
@@ -279,18 +302,42 @@ document.getElementById('obSubmit').onclick = async () => {
   const d = await r.json();
   if (!d.ok) { res.textContent = '❌ ' + d.error; return; }
   res.innerHTML = `✅ Pesanan <b>${d.id}</b> dibuat! Total <b>${rp(d.total)}</b>`;
-  document.getElementById('obNama').value = ''; document.getElementById('obWa').value = ''; document.getElementById('obAlamat').value = '';
+  document.getElementById('obProdukCustom').value = '';
+  document.getElementById('obHarga').value = '';
+  document.getElementById('obQty').value = '1';
+  document.getElementById('obNama').value = '';
+  document.getElementById('obWa').value = '';
+  document.getElementById('obAlamat').value = '';
+  updObTotal();
 };
 
-/* ---------- TAB 3: kelola order ---------- */
+/* ---------- TAB 3: kelola order (filter tanggal + bulk actions) ---------- */
+let ORDERS_ALL = [];          // hasil fetch terakhir dari API (cache)
+let SELECTED = new Set();     // ID order yang dicentang
+
 async function loadOrders() {
   const st = document.getElementById('ordStatus').value;
   const q = document.getElementById('ordSearch').value.trim();
   const r = await api(`/api/dash-admin?action=orders&status=${encodeURIComponent(st)}&search=${encodeURIComponent(q)}`);
   const d = await r.json();
   if (!d.ok) { alert('Gagal: ' + d.error); return; }
-  document.getElementById('ordRows').innerHTML = d.orders.map(o => `
+  ORDERS_ALL = d.orders || [];
+  renderOrders();
+}
+
+/* Render dari cache + filter tanggal di sisi klien */
+function renderOrders() {
+  const dari = document.getElementById('ordDari').value;   // YYYY-MM-DD
+  const sampai = document.getElementById('ordSampai').value;
+  const rows = ORDERS_ALL.filter(o => {
+    const t = wibDate(o.tanggal);
+    if (dari && t < dari) return false;
+    if (sampai && t > sampai) return false;
+    return true;
+  });
+  document.getElementById('ordRows').innerHTML = rows.map(o => `
     <tr class="border-b last:border-0">
+      <td class="py-2 pr-2"><input type="checkbox" class="ordCheck" data-id="${o.id}" ${SELECTED.has(o.id) ? 'checked' : ''}></td>
       <td class="py-2 pr-2 font-mono text-xs">${o.id}<br><span class="text-slate-400">${fmtTgl(o.tanggal)}</span></td>
       <td class="pr-2">${esc(o.nama_penerima)}</td><td class="pr-2">${rp(o.total_harga)}</td>
       <td class="pr-2"><span class="status-${o.status} text-xs px-2 py-0.5 rounded-full">${STATUS_LABEL[o.status]||o.status}</span></td>
@@ -301,11 +348,91 @@ async function loadOrders() {
           ${Object.keys(STATUS_LABEL).map(s => `<option value="${s}" ${s===o.status?'disabled':''}>${STATUS_LABEL[s]}</option>`).join('')}
         </select>
       </td></tr>`).join('')
-    || '<tr><td colspan="5" class="py-3 text-center text-slate-400">Tidak ada order</td></tr>';
+    || '<tr><td colspan="6" class="py-3 text-center text-slate-400">Tidak ada order</td></tr>';
+  const all = document.getElementById('ordCheckAll');
+  const ids = rows.map(o => o.id);
+  if (all) all.checked = ids.length > 0 && ids.every(id => SELECTED.has(id));
+  updateBulkBar();
 }
+
+/* Checkbox per-baris (event delegation) */
+document.getElementById('ordRows').addEventListener('change', e => {
+  const cb = e.target.closest('.ordCheck');
+  if (!cb) return;
+  if (cb.checked) SELECTED.add(cb.dataset.id); else SELECTED.delete(cb.dataset.id);
+  updateBulkBar();
+  const all = document.getElementById('ordCheckAll');
+  const ids = [...document.querySelectorAll('#ordRows .ordCheck')].map(x => x.dataset.id);
+  if (all) all.checked = ids.length > 0 && ids.every(id => SELECTED.has(id));
+});
+/* Checkbox "pilih semua" */
+document.getElementById('ordCheckAll').addEventListener('change', e => {
+  const ids = [...document.querySelectorAll('#ordRows .ordCheck')].map(x => x.dataset.id);
+  if (e.target.checked) ids.forEach(id => SELECTED.add(id));
+  else ids.forEach(id => SELECTED.delete(id));
+  renderOrders();
+});
+
+function updateBulkBar() {
+  const n = SELECTED.size;
+  document.getElementById('bulkBar').classList.toggle('hidden', n === 0);
+  document.getElementById('bulkCount').textContent = n + ' order dipilih';
+}
+
+/* Coba action bulk dulu; kalau server belum dukung, fallback ke request satu per satu */
+async function bulkPost(action, payload) {
+  const r = await api('/api/dash-admin?action=' + action, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  return r.json();
+}
+const errUnknown = (e) => /tidak dikenal|unknown/i.test(String(e || ''));
+
+/* Ubah status massal */
+document.getElementById('bulkApply').onclick = async () => {
+  const status = document.getElementById('bulkStatus').value;
+  const ids = [...SELECTED];
+  if (!ids.length) return;
+  if (!status) return alert('Pilih status dulu');
+  if (!confirm(`Ubah ${ids.length} order → ${STATUS_LABEL[status]}?`)) return;
+  let d = await bulkPost('bulk-update-status', { ids, status });
+  if (!d.ok && errUnknown(d.error)) {
+    // Fallback: update-order satu per satu
+    for (const id of ids) {
+      const x = await bulkPost('update-order', { id, status });
+      if (!x.ok) { d = { ok:false, error:`Gagal di ${id}: ${x.error}` }; break; }
+      d = { ok:true };
+    }
+  }
+  if (!d.ok) return alert('❌ ' + d.error);
+  document.getElementById('bulkStatus').value = '';
+  SELECTED.clear(); updateBulkBar(); loadOrders();
+};
+
+/* Hapus massal — konfirmasi ganda: confirm + ketik jumlah */
+document.getElementById('bulkDel').onclick = async () => {
+  const ids = [...SELECTED];
+  if (!ids.length) return;
+  if (!confirm(`⚠️ Hapus ${ids.length} order?\n\nData yang dihapus TIDAK bisa dikembalikan.`)) return;
+  const ketik = prompt(`Ketik angka ${ids.length} untuk konfirmasi hapus:`);
+  if (String(ketik).trim() !== String(ids.length)) { alert('Batal — angka tidak cocok.'); return; }
+  let d = await bulkPost('bulk-delete', { ids });
+  if (!d.ok && errUnknown(d.error)) {
+    // Fallback: delete-order satu per satu (juga belum ada di server)
+    for (const id of ids) {
+      const x = await bulkPost('delete-order', { id });
+      if (!x.ok) { d = { ok:false, error:'Server belum mendukung hapus order. (' + x.error + ')' }; break; }
+      d = { ok:true };
+    }
+  }
+  if (!d.ok) return alert('❌ ' + d.error);
+  SELECTED.clear(); updateBulkBar(); loadOrders();
+};
+
 document.getElementById('ordCari').onclick = loadOrders;
 document.getElementById('ordSearch').addEventListener('keydown', e => { if (e.key === 'Enter') loadOrders(); });
 document.getElementById('ordStatus').onchange = loadOrders;
+document.getElementById('ordTgl').onclick = renderOrders;
+
 async function ordSetStatus(id, status) {
   if (!status || !confirm(`Ubah ${id} → ${STATUS_LABEL[status]}?`)) return;
   const r = await api('/api/dash-admin?action=update-order', {

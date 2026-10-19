@@ -150,17 +150,17 @@ module.exports = async (req, res) => {
       if (reply) await sendMessage(userId, reply).catch((e) => console.error('[send] gagal:', e.message));
       return res.status(200).send('ok');
     }
-    // Owner kirim foto → teruskan ke admin.handleMessage (OCR resi otomatis)
+    // Owner kirim foto → teruskan ke admin.handleMessage (OCR resi otomatis, tidak silent)
     if (isOwner && msg.photo && msg.photo.length) {
       try {
         const handled = await admin.handleMessage(userId, msg);
-        if (handled !== null) return res.status(200).send('ok');
+        if (handled !== null && handled !== undefined) return res.status(200).send('ok');
       } catch (e) { console.error('[owner-photo] error:', e.message); }
       // fallback: jika tidak ter-handle, lanjut ke text flow di bawah
     }
     if (!msg.text && !msg.caption) return res.status(200).send('ok');
 
-    const text = String(msg.text);
+    const text = String(msg.text || msg.caption || '');
     console.log(`[msg] ${userId}${isOwner ? ' (owner)' : ' (customer)'}: ${text.slice(0, 80)}`);
 
     // ---------- MODE PELANGGAN ----------
@@ -179,12 +179,16 @@ module.exports = async (req, res) => {
     }
 
     // ---------- MODE OWNER ----------
-    // 1) Alur admin (menu/tombol/state) didahulukan bila relevan
+    // 1) Alur admin (menu/tombol/state) didahulukan bila relevan.
+    // Kontrak: null/undefined = tidak di-handle → lanjut ke AI;
+    // string = kirim sebagai balasan; true/lainnya = sudah terkirim internal.
     let adminReply = null;
     try { adminReply = await admin.handleMessage(userId, msg); }
     catch (e) { console.error('[admin-msg] error:', e.message); }
     if (adminReply !== null && adminReply !== undefined) {
-      if (adminReply) await sendMessage(userId, adminReply).catch((e) => console.error('[send] gagal:', e.message));
+      if (typeof adminReply === 'string' && adminReply) {
+        await sendMessage(userId, adminReply).catch((e) => console.error('[send] gagal:', e.message));
+      }
       return res.status(200).send('ok');
     }
 

@@ -154,11 +154,12 @@ module.exports = async (req, res) => {
       const b = await body(req);
 
       if (action === 'create-order') {
-        const { product_id, qty, nama, wa, alamat } = b;
-        const prods = await sbGet('products', { select: 'id,nama,harga', id: `eq.${String(product_id || '')}`, limit: 1 });
-        if (!prods[0]) return res.status(400).json({ ok: false, error: 'Produk tidak ditemukan' });
+        const { product_custom, harga, qty, nama, wa, alamat } = b;
+        const namaProduk = String(product_custom || '').trim();
+        if (!namaProduk) return res.status(400).json({ ok: false, error: 'Nama produk wajib diisi' });
+        const hargaSatuan = Math.max(0, parseInt(harga, 10) || 0);
         const q = Math.max(1, parseInt(qty, 10) || 1);
-        const total = Math.round(Number(prods[0].harga) * q);
+        const total = hargaSatuan * q;
         const orderId = await genOrderId();
         // customer: cari by WA, buat bila belum ada
         let customerId = null;
@@ -181,8 +182,8 @@ module.exports = async (req, res) => {
           alamat_lengkap: String(alamat || ''), total_harga: total, status: 'pending',
         }]);
         await sbPost('order_items', [{
-          order_id: orderId, product_id: prods[0].id, nama_produk: prods[0].nama,
-          qty: q, harga_satuan: Number(prods[0].harga),
+          order_id: orderId, product_id: null, nama_produk: namaProduk,
+          qty: q, harga_satuan: hargaSatuan,
         }]);
         // Notifikasi: WA ke customer (tagihan + QRIS) + Telegram ke owner
         try {
@@ -198,7 +199,7 @@ module.exports = async (req, res) => {
             }
           } catch (e) { console.error('[dash] QRIS gagal:', e.message); }
           if (cWa.length >= 10) {
-            const tagihan = `🧾 *PESANAN BARU (${orderId})*\n\nHalo kak ${nama}! Terima kasih sudah order di Digiprint.\n\n📦 ${prods[0].nama}\nJumlah: ${q}\n*Total: ${rpF(total)}*\n\n${qrUrl ? 'Silakan scan QRIS di bawah untuk bayar 👇' : 'Silakan lakukan pembayaran. Kirim bukti transfer ke sini ya kak 🙏'}`;
+            const tagihan = `🧾 *PESANAN BARU (${orderId})*\n\nHalo kak ${nama}! Terima kasih sudah order di Digiprint.\n\n📦 ${namaProduk}\nJumlah: ${q}\n*Total: ${rpF(total)}*\n\n${qrUrl ? 'Silakan scan QRIS di bawah untuk bayar 👇' : 'Silakan lakukan pembayaran. Kirim bukti transfer ke sini ya kak 🙏'}`;
             if (qrUrl) {
               // Kirim gambar QRIS + teks tagihan
               await sbPost('wa_outbox', [{ to_wa: cWa, kind: 'image', status: 'pending', content: qrUrl, caption: tagihan, image_url: qrUrl }]);
@@ -213,7 +214,7 @@ module.exports = async (req, res) => {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 chat_id: ownerId,
-                text: `🛍️ *ORDER BARU (Dashboard)*\n\nID: ${orderId}\nCustomer: ${nama} (${cWa})\nProduk: ${prods[0].nama} x${q}\nTotal: ${rpF(total)}`,
+                text: `🛍️ *ORDER BARU (Dashboard)*\n\nID: ${orderId}\nCustomer: ${nama} (${cWa})\nProduk: ${namaProduk} x${q}\nTotal: ${rpF(total)}`,
                 parse_mode: 'Markdown',
               }),
             }).catch(() => {});
@@ -241,6 +242,47 @@ module.exports = async (req, res) => {
           }
         } catch (e) { console.error('[dash] notif status gagal:', e.message); }
         return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'bulk-update-status') {
+        const ids = Array.isArray(b.ids) ? b.ids.map((x) => String(x).toUpperCase()) : [];
+        const status = String(b.status || '');
+        if (!STATUS_OK.includes(status)) return res.status(400).json({ ok: false, error: 'Status tidak valid' });
+        if (!ids.length) return res.status(400).json({ ok: false, error: 'Tidak ada order dipilih' });
+        const statusLabel = { pending: 'Menunggu Pembayaran ⏳', diproses: 'Diproses ⚙️', dikirim: 'Dikirim 🚚', selesai: 'Selesai ✅', batal: 'Dibatalkan ❌' };
+        let okCount = 0;
+        for (const id of ids.slice(0, 50)) {
+          try {
+            await sbPatch('orders', { id: `eq.${id}` }, { status });
+            try {
+              const ords = await sbGet('orders', { select: 'nama_penerima,nomor_wa,nomor_resi', id: `eq.${id}`, limit: 1 });
+              const o = ords[0];
+              const cWa = String(o?.nomor_wa || '').replace(/\D/g, '');
+              if (cWa.length >= 10 && statusLabel[status]) {
+                let msg = `📦 *UPDATE PESANAN (${id})*\n\nHalo kak ${o.nama_penerima}! Status pesanan kakak: *${statusLabel[status]}*`;
+                if (status === 'dikirim' && o.nomor_resi) msg += `\n\nNo. Resi: ${o.nomor_resi}`;
+                if (status === 'selesai') msg += `\n\nTerima kasih sudah order di Digiprint! 🙏`;
+                await sbPost('wa_outbox', [{ to_wa: cWa, kind: 'text', status: 'pending', content: msg }]);
+              }
+            } catch (e) { console.error('[dash] notif bulk gagal:', id, e.message); }
+            okCount++;
+          } catch (e) { console.error('[dash] bulk-update gagal:', id, e.message); }
+        }
+        return res.status(200).json({ ok: true, updated: okCount, total: ids.length });
+      }
+
+      if (action === 'bulk-delete') {
+        const ids = Array.isArray(b.ids) ? b.ids.map((x) => String(x).toUpperCase()) : [];
+        if (!ids.length) return res.status(400).json({ ok: false, error: 'Tidak ada order dipilih' });
+        let okCount = 0;
+        for (const id of ids.slice(0, 50)) {
+          try {
+            await sbDelete('order_items', { order_id: `eq.${id}` }).catch(() => {});
+            await sbDelete('orders', { id: `eq.${id}` });
+            okCount++;
+          } catch (e) { console.error('[dash] bulk-delete gagal:', id, e.message); }
+        }
+        return res.status(200).json({ ok: true, deleted: okCount, total: ids.length });
       }
 
       if (action === 'update-product') {

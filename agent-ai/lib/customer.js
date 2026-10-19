@@ -176,6 +176,11 @@ ATURAN:
 - confirmed: true bila pelanggan menyetujui ("ya", "oke", "setuju"), false bila menolak ("tidak", "batal"), null bila tidak ada.
 - reply: balasan natural 1-3 kalimat. Bila masih ada yang kurang dan step collecting/idle, tanyakan SATU hal yang paling penting berikutnya. Jangan mengarang harga.
 - PENTING: Jangan pernah tampilkan daftar produk/katalog dalam reply. Kalau pelanggan tanya ukuran spesifik (mis. "1/2"), jawab HANYA tentang ukuran itu (varian ply & harga). Jangan sebutkan ukuran lain. Katalog hanya ditampilkan oleh sistem bila pelanggan minta eksplisit.
+- PANDUAN UKURAN (kertas F4 21x32cm, bisa diputar):
+  1 folio=21x32 | 1/2=16x21 | 1/3=11x21 | 1/4=8x21 atau 11x16 | 1/6=10x10 | 1/8=10x8 | 1/10=10x6
+  Jika pelanggan menyebut ukuran dalam cm (mis. "21 x 8", "10x10", "21x32"), konversikan ke fraksi folio terdekat dari panduan di atas (abaikan urutan: "21x8" = "8x21" = 1/4).
+  Lalu jawab dengan harga produk folio tersebut dari DAFTAR PRODUK. Contoh: "21 x 8" → 1/4 folio → sebutkan harga 1/4 folio (1ply/2ply/3ply, 50/100 lembar).
+  Produk custom (ukuran tidak standar) tetap bisa dipesan — pakai harga folio terdekat sebagai acuan.
 
 Balas HANYA JSON valid:
 {"intent":"order","product_id":null,"product_hint":null,"qty":null,"name":null,"phone":null,"address":null,"confirmed":null,"reply":"..."}
@@ -502,7 +507,7 @@ async function handleCustomer(userId, text, onPhoto) {
     // Cari order pending by WA (untuk order dari dashboard tanpa sesi)
     try {
       const waDigits = String(userId).replace('wa:', '').replace(/\D/g, '');
-      const orders = await sbGet('orders', { select: 'id,total_harga,payment_trx_id,nama_penerima', status: 'eq.pending', order: 'tanggal.desc', limit: 5 }).catch(() => []);
+      const orders = await sbGet('orders', { select: 'id,total_harga,payment_trx_id,nama_penerima,nomor_wa', status: 'eq.pending', order: 'tanggal.desc', limit: 5 }).catch(() => []);
       const mine = orders.find(o => String(o.nomor_wa || '').replace(/\D/g, '').slice(-10) === waDigits.slice(-10));
       // Fallback: cari by nomor_wa langsung jika field tersedia
       let target = mine;
