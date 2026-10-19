@@ -1,5 +1,4 @@
 'use strict';
-// VERSI: 2026-10-19-1255-bayarDiToko
 /**
  * lib/admin.js — MENU ADMIN, port 1:1 dari toko-bot/telegram-2.js (bot lama),
  * digabung dengan fitur baru (7 fitur admin + fitur jualan).
@@ -169,6 +168,24 @@ async function queueWA(toWa, kind, content, caption, imageUrl) {
   if (imageUrl) row.image_url = imageUrl;
   try {
     await sbPost('wa_outbox', [row], 'return=minimal');
+    // Kirim log ke bot Telegram khusus log (jika dikonfigurasi)
+    try {
+      const logToken = process.env.TELEGRAM_LOG_BOT_TOKEN;
+      const logChatId = process.env.TELEGRAM_LOG_CHAT_ID || OWNER_ID;
+      if (logToken) {
+        const preview = kind === 'text' ? String(content).slice(0, 100) :
+          kind === 'image' ? '🖼️ Gambar' : '📄 Dokumen';
+        await fetch(`https://api.telegram.org/bot${logToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: logChatId,
+            text: `📤 *WA terkirim*\nKe: \`${row.to_wa}\`\nIsi: ${preview}${caption ? '\nCaption: ' + String(caption).slice(0, 80) : ''}`,
+            parse_mode: 'Markdown',
+          }),
+        }).catch(() => {});
+      }
+    } catch (e) {}
     return true;
   } catch (e) {
     console.error('[admin] queueWA gagal:', e.message);
