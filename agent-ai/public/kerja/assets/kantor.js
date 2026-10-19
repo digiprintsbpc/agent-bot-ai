@@ -848,23 +848,16 @@ const LOUNGE_PADS = [];
   const loungeRug = mesh(new THREE.PlaneGeometry(3.4, 2.4).rotateX(-Math.PI / 2), mat('#c3c9d2', 1), { cast: false });
   loungeRug.position.set(0, 0.012, 0.6);
   lounge.add(magazine, loungeMug, loungeRug);
-  // Tandai mug kopi sebagai clickable
-  loungeMug.traverse((o) => {
-    if (o.isMesh) { o.userData.objKey = 'coffee'; objPickables.push(o); }
-  });
   const pad1 = gamepad('#f4f4f6');
   pad1.position.set(-0.35, 0.47, 1.05);
   pad1.rotation.y = 0.5;
   const pad2 = gamepad('#1d1f24');
   pad2.position.set(0.1, 0.47, 0.95);
   pad2.rotation.y = -0.3;
-  // Tandai gamepad sebagai clickable
-  for (const pad of [pad1, pad2]) {
-    pad.traverse((o) => {
-      if (o.isMesh) { o.userData.objKey = 'gamepad'; objPickables.push(o); }
-    });
-  }
   lounge.add(pad1, pad2);
+  // Simpan referensi untuk ditandai clickable nanti (setelah objPickables didefinisikan)
+  window._loungeMug = loungeMug;
+  window._loungePads = [pad1, pad2];
   LOUNGE_PADS.push(pad1, pad2);
   scene.add(lounge, tvCorner(4.9, 0, -1.3));
 })();
@@ -1517,6 +1510,19 @@ function tagMonitors() {
       objPickables.push(o);
     }
   });
+  // Kopi & gamepad: tandai sebagai clickable
+  if (window._loungeMug) {
+    window._loungeMug.traverse((o) => {
+      if (o.isMesh) { o.userData.objKey = 'coffee'; objPickables.push(o); }
+    });
+  }
+  if (window._loungePads) {
+    for (const pad of window._loungePads) {
+      pad.traverse((o) => {
+        if (o.isMesh) { o.userData.objKey = 'gamepad'; objPickables.push(o); }
+      });
+    }
+  }
 }
 function guitarMesh() {
   const g = new THREE.Group();
@@ -2377,37 +2383,15 @@ function showObjPopup(objKey) {
   if (objKey === 'coffee') {
     title.textContent = '☕ Pojok Kopi';
     content.innerHTML = `<p style="font-size:16px">Ngopi dulu biar semangat! ☕</p>
-    <p style="color:var(--muted);font-size:13px">Klik lagi untuk seduh kopi baru.</p>
-    <button onclick="brewCoffee()" style="margin-top:10px;padding:10px 20px;background:#6f4e37;color:white;border:none;border-radius:8px;cursor:pointer;font-size:14px">☕ Seduh Kopi</button>
-    <div id="coffeeMsg" style="margin-top:10px;font-size:14px"></div>
-    <script>
-    function brewCoffee() {
-      const msgs = ['☕ Kopi tubruk diseduh!', '☕ Kopi susu gula aren!', '☕ Espresso double shot!', '☕ Kopi hitam pekat!'];
-      document.getElementById('coffeeMsg').textContent = msgs[Math.floor(Math.random() * msgs.length)] + ' Selamat ngopi! 🎉';
-    }
-    </script>`;
+    <p style="color:var(--muted);font-size:13px">Klik tombol untuk seduh kopi baru.</p>
+    <button onclick="window.brewCoffee()" style="margin-top:10px;padding:10px 20px;background:#6f4e37;color:white;border:none;border-radius:8px;cursor:pointer;font-size:14px">☕ Seduh Kopi</button>
+    <div id="coffeeMsg" style="margin-top:10px;font-size:14px"></div>`;
   } else if (objKey === 'gamepad') {
     title.textContent = '🎮 Area Game';
     content.innerHTML = `<p style="font-size:16px">Waktunya istirahat main game!</p>
     <p style="color:var(--muted);font-size:13px">Tekan tombol secepatnya dalam 5 detik!</p>
-    <button id="gameBtn" onclick="startGame()" style="margin-top:10px;padding:12px 24px;background:#e74c3c;color:white;border:none;border-radius:8px;cursor:pointer;font-size:16px">🎮 MULAI</button>
-    <div id="gameScore" style="margin-top:10px;font-size:18px;font-weight:bold"></div>
-    <script>
-    let score = 0, gameActive = false;
-    function startGame() {
-      score = 0; gameActive = true;
-      document.getElementById('gameScore').textContent = 'Skor: 0 — KLIK TOMBOL!';
-      const btn = document.getElementById('gameBtn');
-      btn.textContent = '👆 KLIK!';
-      btn.onclick = () => { if (gameActive) { score++; document.getElementById('gameScore').textContent = 'Skor: ' + score + ' — Terus!'; } };
-      setTimeout(() => {
-        gameActive = false;
-        btn.textContent = '🎮 MAIN LAGI';
-        btn.onclick = startGame;
-        document.getElementById('gameScore').innerHTML = '🏁 Selesai! Skor akhir: <b>' + score + '</b>' + (score >= 20 ? ' 🎉 Hebat!' : score >= 10 ? ' 👍 Lumayan!' : ' 😅 Coba lagi!');
-      }, 5000);
-    }
-    </script>`;
+    <button id="gameBtn" onclick="window.startGame()" style="margin-top:10px;padding:12px 24px;background:#e74c3c;color:white;border:none;border-radius:8px;cursor:pointer;font-size:16px">🎮 MULAI</button>
+    <div id="gameScore" style="margin-top:10px;font-size:18px;font-weight:bold"></div>`;
   } else if (objKey === 'screen-A0') {
     // Monitor Lexa (ketua) → tampilkan dashboard web dalam iframe
     title.textContent = '💻 Komputer Lexa — Dashboard Toko';
@@ -2618,3 +2602,34 @@ setTimeout(() => {
   $('loading').classList.add('gone');
   setTimeout(() => $('loading').remove(), 900);
 }, 500);
+
+// ===== Fungsi interaktif kopi & game (global) =====
+window.brewCoffee = function() {
+  const msgs = ['☕ Kopi tubruk diseduh!', '☕ Kopi susu gula aren!', '☕ Espresso double shot!', '☕ Kopi hitam pekat!'];
+  const el = document.getElementById('coffeeMsg');
+  if (el) el.textContent = msgs[Math.floor(Math.random() * msgs.length)] + ' Selamat ngopi! 🎉';
+};
+
+window._gameScore = 0;
+window._gameActive = false;
+window.startGame = function() {
+  window._gameScore = 0; window._gameActive = true;
+  const scoreEl = document.getElementById('gameScore');
+  const btn = document.getElementById('gameBtn');
+  if (!scoreEl || !btn) return;
+  scoreEl.textContent = 'Skor: 0 — KLIK TOMBOL!';
+  btn.textContent = '👆 KLIK!';
+  btn.onclick = () => {
+    if (window._gameActive) {
+      window._gameScore++;
+      scoreEl.textContent = 'Skor: ' + window._gameScore + ' — Terus!';
+    }
+  };
+  setTimeout(() => {
+    window._gameActive = false;
+    btn.textContent = '🎮 MAIN LAGI';
+    btn.onclick = window.startGame;
+    const s = window._gameScore;
+    scoreEl.innerHTML = '🏁 Selesai! Skor akhir: <b>' + s + '</b>' + (s >= 20 ? ' 🎉 Hebat!' : s >= 10 ? ' 👍 Lumayan!' : ' 😅 Coba lagi!');
+  }, 5000);
+};
