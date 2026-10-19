@@ -34,7 +34,7 @@ function fmtDate(d) {
  * Generate PDF invoice. Return Promise<Buffer>.
  */
 function generateInvoice(order) {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     try {
       const doc = new PDFDocument({ size: 'A4', margin: 50 });
       const chunks = [];
@@ -44,14 +44,28 @@ function generateInvoice(order) {
 
       const o = order || {};
       const items = Array.isArray(o.items) ? o.items : [];
+      const profile = o._profile || {};
 
       // ===== Header =====
+      // Logo (jika ada)
+      if (profile.logo) {
+        try {
+          const logoRes = await fetch(profile.logo, { signal: AbortSignal.timeout(5000) });
+          if (logoRes.ok) {
+            const logoBuf = Buffer.from(await logoRes.arrayBuffer());
+            doc.image(logoBuf, 50, 40, { width: 60 });
+          }
+        } catch (e) { /* logo gagal, lanjut tanpa logo */ }
+      }
       doc.fontSize(24).font('Helvetica-Bold').fillColor('#1a1a1a')
-        .text('DIGIPRINT', 50, 50);
+        .text(profile.nama || 'DIGIPRINT', 120, 50);
       doc.fontSize(10).font('Helvetica').fillColor('#666666')
-        .text('Cetak Nota & Kwitansi Custom', 50, 78);
+        .text('Cetak Nota & Kwitansi Custom', 120, 78);
       doc.fontSize(10).fillColor('#666666')
-        .text('WhatsApp: 0812-xxxx-xxxx', 50, 92);
+        .text(`WhatsApp: ${profile.kontak || '0812-xxxx-xxxx'}`, 120, 92);
+      if (profile.alamat && profile.alamat !== '-') {
+        doc.fontSize(9).fillColor('#888888').text(profile.alamat, 120, 106, { width: 250 });
+      }
 
       // Nomor invoice & tanggal (kanan)
       doc.fontSize(14).font('Helvetica-Bold').fillColor('#1a1a1a')
