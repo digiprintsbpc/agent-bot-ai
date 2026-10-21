@@ -67,6 +67,15 @@ async function sbDelete(table, match) {
   if (!r.ok) throw new Error(`${table} delete: ${r.status}`);
 }
 
+/** Sinkronkan products.stok produk digital = jumlah stok_digital tersedia. */
+async function syncDigitalStock(produkId) {
+  try {
+    const rows = await sbGet('stok_digital', { select: 'id', produk_id: `eq.${produkId}`, status: 'eq.tersedia', limit: 5000 });
+    await sbPatch('products', { id: `eq.${produkId}` }, { stok: rows.length });
+    return rows.length;
+  } catch { return null; }
+}
+
 function body(req) {
   return new Promise((resolve) => {
     let s = '';
@@ -100,6 +109,29 @@ module.exports = async (req, res) => {
     if (method === 'GET' && action === 'products') {
       const rows = await sbGet('products', { select: 'id,nama,kategori,harga,stok', order: 'nama.asc', limit: 200 });
       return res.status(200).json({ ok: true, products: rows });
+    }
+
+    // ---------- PRODUK DIGITAL ----------
+    if (method === 'GET' && action === 'digital-products') {
+      const rows = await sbGet('products', { select: 'id,nama,harga,template_kirim,durasi_hari,garansi_hari', tipe: 'eq.digital', order: 'id.asc', limit: 100 });
+      const stok = await sbGet('stok_digital', { select: 'produk_id,status', limit: 5000 }).catch(() => []);
+      const counts = {};
+      for (const s of stok) {
+        counts[s.produk_id] = counts[s.produk_id] || { tersedia: 0, dikunci: 0, terjual: 0 };
+        if (counts[s.produk_id][s.status] !== undefined) counts[s.produk_id][s.status]++;
+      }
+      const products = rows.map((p) => ({ ...p, stokHitung: counts[p.id] || { tersedia: 0, dikunci: 0, terjual: 0 } }));
+      return res.status(200).json({ ok: true, products });
+    }
+
+    if (method === 'GET' && action === 'digital-stock') {
+      const produk = String(req.query?.produk || '');
+      if (!produk) return res.status(400).json({ ok: false, error: 'produk wajib' });
+      const rows = await sbGet('stok_digital', {
+        select: 'id,isi,isi2,status,order_id,nomor_wa,dikirim_at,kedaluwarsa_at,created_at',
+        produk_id: `eq.${produk}`, order: 'created_at.desc', limit: 500,
+      });
+      return res.status(200).json({ ok: true, items: rows });
     }
 
     if (method === 'GET' && action === 'orders') {
@@ -321,6 +353,70 @@ module.exports = async (req, res) => {
 
       if (action === 'delete-pengeluaran') {
         await sbDelete('pengeluaran', { id: `eq.${String(b.id || '')}` });
+        return res.status(200).json({ ok: true });
+      }
+
+      // ---------- PRODUK DIGITAL (POST) ----------
+      if (action === 'save-digital-product') {
+        const id = String(b.id || '').trim().replace(/\s+/g, '');
+        if (!/^[A-Za-z0-9_-]{2,20}$/.test(id)) return res.status(400).json({ ok: false, error: 'Kode tidak valid (2–20 huruf/angka)' });
+        const nama = String(b.nama || '').trim();
+        if (!nama) return res.status(400).json({ ok: false, error: 'Nama wajib diisi' });
+        const row = {
+          id, nama, kategori: 'Digital', deskripsi: '',
+          harga: Math.max(0, parseInt(b.harga, 10) || 0),
+          tipe: 'digital',
+          template_kirim: String(b.template_kirim || ''),
+          durasi_hari: Math.max(0, parseInt(b.durasi_hari, 10) || 0),
+          garansi_hari: Math.max(0, parseInt(b.garansi_hari, 10) || 0),
+        };
+        const r = await fetch(`${SB_URL}/rest/v1/products`, {
+          method: 'POST',
+          headers: { apikey: SB_KEY, 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' },
+          body: JSON.stringify([row]),
+        });
+        if (!r.ok) throw new Error(`products upsert: ${r.status} ${await r.text().catch(() => '')}`.slice(0, 200));
+        await syncDigitalStock(id);
+        return res.status(200).json({ ok: true, id });
+      }
+
+      if (action === 'add-digital-stock') {
+        const produkId = String(b.produk_id || '').trim();
+        if (!produkId) return res.status(400).json({ ok: false, error: 'produk wajib' });
+        const entries = String(b.teks || '').split('\n').map((s) => s.trim()).filter(Boolean)
+          .map((ln) => { const parts = ln.split('|').map((s) => s.trim()); return { isi: parts[0], isi2: parts[1] || '' }; })
+          .filter((e) => e.isi);
+        if (!entries.length) return res.status(400).json({ ok: false, error: 'Tidak ada stok terbaca' });
+        const existing = await sbGet('stok_digital', { select: 'isi,isi2', produk_id: `eq.${produkId}`, status: 'neq.terjual', limit: 5000 });
+        const seen = new Set(existing.map((e) => `${e.isi}||${e.isi2 || ''}`));
+        const rows = [];
+        let dupes = 0;
+        for (const e of entries) {
+          const key = `${e.isi}||${e.isi2 || ''}`;
+          if (seen.has(key)) { dupes++; continue; }
+          seen.add(key);
+          rows.push({ produk_id: produkId, isi: e.isi, isi2: e.isi2 || null, status: 'tersedia' });
+        }
+        if (rows.length) await sbPost('stok_digital', rows);
+        const sisa = await syncDigitalStock(produkId);
+        return res.status(200).json({ ok: true, added: rows.length, dupes, sisa });
+      }
+
+      if (action === 'delete-digital-stock') {
+        const itemId = String(b.id || '');
+        const rows = await sbGet('stok_digital', { select: 'id,produk_id,status', id: `eq.${itemId}`, limit: 1 });
+        if (!rows[0]) return res.status(404).json({ ok: false, error: 'Item tidak ditemukan' });
+        if (rows[0].status !== 'tersedia') return res.status(400).json({ ok: false, error: 'Hanya stok tersedia yang bisa dihapus' });
+        await sbDelete('stok_digital', { id: `eq.${itemId}` });
+        const sisa = await syncDigitalStock(rows[0].produk_id);
+        return res.status(200).json({ ok: true, sisa });
+      }
+
+      if (action === 'delete-digital-product') {
+        const id = String(b.id || '').trim();
+        if (!id) return res.status(400).json({ ok: false, error: 'id wajib' });
+        await sbDelete('stok_digital', { produk_id: `eq.${id}`, status: 'eq.tersedia' }).catch(() => {});
+        await sbDelete('products', { id: `eq.${id}` });
         return res.status(200).json({ ok: true });
       }
 

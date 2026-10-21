@@ -53,6 +53,7 @@
         <button class="tab-btn" data-tab="order-baru">🛒 Buat Pesanan</button>
         <button class="tab-btn" data-tab="orders">📋 Kelola Order</button>
         <button class="tab-btn" data-tab="produk">📦 Produk</button>
+        <button class="tab-btn" data-tab="digital">📱 Produk Digital</button>
         <button class="tab-btn" data-tab="keuangan">💸 Keuangan</button>
       </nav>
     </div>
@@ -191,6 +192,52 @@
         </tr></thead><tbody id="kgRows"></tbody></table>
       </div>
     </section>
+    <!-- ============ TAB 6: PRODUK DIGITAL ============ -->
+    <section id="tab-digital" class="hidden">
+      <div class="card overflow-x-auto mb-3">
+        <h2 class="font-semibold mb-2">📱 Produk Digital</h2>
+        <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+          <th class="py-2 pr-2">Kode</th><th class="pr-2">Nama</th><th class="pr-2">Harga</th><th class="pr-2">Stok</th><th class="pr-2">Aktif</th><th class="pr-2">Garansi</th><th>Aksi</th>
+        </tr></thead><tbody id="dgRows"></tbody></table>
+        <p class="text-xs text-slate-400 mt-2">Klik <b>Stok</b> untuk mengelola stok produk itu. Stok = jumlah item tersedia; terjual tercatat otomatis.</p>
+      </div>
+
+      <div class="card mb-3 max-w-2xl">
+        <h2 class="font-semibold mb-3" id="dgFormTitle">➕ Tambah / Edit Produk Digital</h2>
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div><label class="text-xs text-slate-500">Kode produk</label><input id="dgKode" class="inp" placeholder="cc1b"></div>
+          <div><label class="text-xs text-slate-500">Nama produk</label><input id="dgNama" class="inp" placeholder="CapCut Pro 1 Bulan"></div>
+          <div><label class="text-xs text-slate-500">Harga (Rp)</label><input id="dgHarga" type="number" min="0" class="inp" placeholder="25000"></div>
+          <div class="grid grid-cols-2 gap-2">
+            <div><label class="text-xs text-slate-500">Aktif (hari)</label><input id="dgDurasi" type="number" min="0" class="inp" placeholder="30"></div>
+            <div><label class="text-xs text-slate-500">Garansi (hari)</label><input id="dgGaransi" type="number" min="0" class="inp" placeholder="20"></div>
+          </div>
+        </div>
+        <label class="text-xs text-slate-500">Template pengiriman — pakai {ISI} untuk link/email dan {ISI2} untuk password</label>
+        <textarea id="dgTemplate" class="inp mb-3 font-mono text-xs" rows="9" placeholder="Email: {ISI}&#10;Password: {ISI2}"></textarea>
+        <div class="flex gap-2">
+          <button id="dgSave" class="btn-primary flex-1">💾 Simpan Produk</button>
+          <button id="dgBaru" class="border rounded-xl px-4 text-sm font-semibold text-slate-600">Produk Baru</button>
+        </div>
+        <p id="dgFormMsg" class="text-sm mt-2 hidden"></p>
+      </div>
+
+      <div class="card">
+        <h2 class="font-semibold mb-1" id="dgStokTitle">📦 Stok</h2>
+        <p id="dgStokInfo" class="text-xs text-slate-500 mb-3">Pilih produk dulu lewat tombol <b>Stok</b> di tabel atas.</p>
+        <div id="dgStokBox" class="hidden">
+          <label class="text-xs text-slate-500">Tambah stok — 1 baris = 1 item. Akun: <span class="font-mono">email | password</span> · Link: 1 link per baris</label>
+          <textarea id="dgStokTeks" class="inp mb-2 font-mono text-xs" rows="6" placeholder="akun1@capcut.team | password1&#10;akun2@capcut.team | password2"></textarea>
+          <button id="dgStokAdd" class="btn-primary !py-2 text-sm mb-4">➕ Tambahkan Stok</button>
+          <p id="dgStokMsg" class="text-sm mb-2 hidden"></p>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+              <th class="py-2 pr-2">Isi</th><th class="pr-2">Isi 2</th><th class="pr-2">Status</th><th class="pr-2">Order / WA</th><th class="pr-2">Kedaluwarsa</th><th>Aksi</th>
+            </tr></thead><tbody id="dgStokRows"></tbody></table>
+          </div>
+        </div>
+      </div>
+    </section>
   </div>
 </div>
 
@@ -224,7 +271,7 @@ function showLogin(bad) {
 document.getElementById('logoutBtn').onclick = () => { sessionStorage.removeItem('dash_pin'); PIN=''; showLogin(false); };
 
 /* ---------- tabs ---------- */
-const TABS = ['dash','order-baru','orders','produk','keuangan'];
+const TABS = ['dash','order-baru','orders','produk','digital','keuangan'];
 document.querySelectorAll('#tabs .tab-btn').forEach(b => b.onclick = () => {
   document.querySelectorAll('#tabs .tab-btn').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
@@ -232,6 +279,7 @@ document.querySelectorAll('#tabs .tab-btn').forEach(b => b.onclick = () => {
     document.getElementById('tab-' + t).classList.toggle('hidden', t !== b.dataset.tab));
   if (b.dataset.tab === 'orders') loadOrders();
   if (b.dataset.tab === 'produk') loadProduk();
+  if (b.dataset.tab === 'digital') loadDigital();
   if (b.dataset.tab === 'keuangan') loadKeuangan();
   window.scrollTo(0, 0);
 });
@@ -546,6 +594,153 @@ async function kgDel(id) {
   const d = await r.json();
   if (!d.ok) return alert('❌ ' + d.error);
   loadKeuangan();
+}
+
+/* ---------- TAB 6: produk digital ---------- */
+let DIG_PRODUCTS = [];
+let DIG_SEL = null;
+let DIG_ITEMS = {};
+const DG_STATUS = { tersedia:['Tersedia','#d1fae5','#065f46'], dikunci:['Dikunci','#fef3c7','#92400e'], terjual:['Terjual','#e2e8f0','#475569'] };
+
+async function loadDigital() {
+  const r = await api('/api/dash-admin?action=digital-products');
+  const d = await r.json();
+  if (!d.ok) { alert('Gagal: ' + d.error); return; }
+  DIG_PRODUCTS = d.products || [];
+  document.getElementById('dgRows').innerHTML = DIG_PRODUCTS.map(p => `
+    <tr class="border-b last:border-0 ${DIG_SEL === p.id ? 'bg-indigo-50' : ''}">
+      <td class="py-2 pr-2 font-mono text-xs font-bold">${esc(p.id)}</td>
+      <td class="pr-2">${esc(p.nama)}</td>
+      <td class="pr-2">${rp(p.harga)}</td>
+      <td class="pr-2"><b class="${p.stokHitung.tersedia <= 3 ? 'stok-rendah' : ''}">${p.stokHitung.tersedia}</b> <span class="text-xs text-slate-400">(${p.stokHitung.terjual} terjual)</span></td>
+      <td class="pr-2 text-xs">${p.durasi_hari > 0 ? p.durasi_hari + ' hari' : '∞'}</td>
+      <td class="pr-2 text-xs">${p.garansi_hari > 0 ? p.garansi_hari + ' hari' : '–'}</td>
+      <td class="whitespace-nowrap">
+        <button class="text-indigo-600 text-xs font-semibold mr-2" onclick="digPilih('${esc(p.id)}')">📦 Stok</button>
+        <button class="text-indigo-600 text-xs font-semibold mr-2" onclick="digEdit('${esc(p.id)}')">✏️ Edit</button>
+        <button class="btn-danger" onclick="digDelProduk('${esc(p.id)}','${esc(p.nama)}')">Hapus</button>
+      </td></tr>`).join('')
+    || '<tr><td colspan="7" class="py-3 text-center text-slate-400">Belum ada produk digital</td></tr>';
+  if (DIG_SEL && DIG_PRODUCTS.some(p => p.id === DIG_SEL)) loadDigitalStock();
+}
+
+function digPilih(id) {
+  DIG_SEL = id;
+  const p = DIG_PRODUCTS.find(x => x.id === id);
+  document.getElementById('dgStokTitle').textContent = `📦 Stok — ${p ? p.nama : id} (${id})`;
+  document.getElementById('dgStokInfo').textContent = 'Item teratas = yang paling baru ditambahkan. Item "tersedia" akan terkirim ke pembeli sesuai urutan masuk.';
+  document.getElementById('dgStokBox').classList.remove('hidden');
+  loadDigital();
+  document.getElementById('dgStokBox').scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+
+async function loadDigitalStock() {
+  if (!DIG_SEL) return;
+  const r = await api('/api/dash-admin?action=digital-stock&produk=' + encodeURIComponent(DIG_SEL));
+  const d = await r.json();
+  if (!d.ok) { alert('Gagal: ' + d.error); return; }
+  DIG_ITEMS = {};
+  (d.items || []).forEach(it => { DIG_ITEMS[it.id] = it; });
+  document.getElementById('dgStokRows').innerHTML = (d.items || []).map(it => {
+    const st = DG_STATUS[it.status] || [it.status, '#e2e8f0', '#475569'];
+    return `
+    <tr class="border-b last:border-0 align-top">
+      <td class="py-2 pr-2 font-mono text-xs break-all max-w-[220px]">${esc(it.isi)}</td>
+      <td class="py-2 pr-2 font-mono text-xs">${it.isi2 ? `<span id="dgI2-${it.id}">••••••</span> <button class="text-indigo-600 font-semibold" onclick="digLihat2(${it.id})">👁</button>` : '<span class="text-slate-300">–</span>'}</td>
+      <td class="pr-2"><span class="text-xs px-2 py-0.5 rounded-full" style="background:${st[1]};color:${st[2]}">${st[0]}</span></td>
+      <td class="pr-2 text-xs">${it.order_id ? esc(it.order_id) + '<br>' + esc(it.nomor_wa || '') : '<span class="text-slate-300">–</span>'}</td>
+      <td class="pr-2 text-xs">${it.kedaluwarsa_at ? fmtTgl(it.kedaluwarsa_at) : '<span class="text-slate-300">–</span>'}</td>
+      <td>${it.status === 'tersedia' ? `<button class="btn-danger" onclick="digDelStok(${it.id})">Hapus</button>` : ''}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" class="py-3 text-center text-slate-400">Belum ada stok</td></tr>';
+}
+
+function digLihat2(id) {
+  const el = document.getElementById('dgI2-' + id);
+  const it = DIG_ITEMS[id];
+  if (!el || !it) return;
+  el.textContent = el.textContent === '••••••' ? (it.isi2 || '') : '••••••';
+}
+
+function digEdit(id) {
+  const p = DIG_PRODUCTS.find(x => x.id === id);
+  if (!p) return;
+  document.getElementById('dgKode').value = p.id;
+  document.getElementById('dgKode').readOnly = true;
+  document.getElementById('dgNama').value = p.nama || '';
+  document.getElementById('dgHarga').value = p.harga || 0;
+  document.getElementById('dgDurasi').value = p.durasi_hari || 0;
+  document.getElementById('dgGaransi').value = p.garansi_hari || 0;
+  document.getElementById('dgTemplate').value = p.template_kirim || '';
+  document.getElementById('dgFormTitle').textContent = '✏️ Edit Produk Digital — ' + p.id;
+  document.getElementById('dgFormTitle').scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+function digBaru() {
+  ['dgKode','dgNama','dgHarga','dgDurasi','dgGaransi','dgTemplate'].forEach(i => document.getElementById(i).value = '');
+  document.getElementById('dgKode').readOnly = false;
+  document.getElementById('dgFormTitle').textContent = '➕ Tambah / Edit Produk Digital';
+  document.getElementById('dgFormMsg').classList.add('hidden');
+}
+document.getElementById('dgBaru').onclick = digBaru;
+
+document.getElementById('dgSave').onclick = async () => {
+  const payload = {
+    id: document.getElementById('dgKode').value.trim(),
+    nama: document.getElementById('dgNama').value.trim(),
+    harga: document.getElementById('dgHarga').value,
+    durasi_hari: document.getElementById('dgDurasi').value,
+    garansi_hari: document.getElementById('dgGaransi').value,
+    template_kirim: document.getElementById('dgTemplate').value,
+  };
+  const msg = document.getElementById('dgFormMsg');
+  msg.classList.remove('hidden');
+  if (!payload.id) { msg.textContent = '❌ Kode wajib diisi'; return; }
+  if (!payload.nama) { msg.textContent = '❌ Nama wajib diisi'; return; }
+  if (!payload.template_kirim.includes('{ISI}')) {
+    if (!confirm('Template tidak mengandung {ISI} — pembeli tidak akan menerima link/akunnya. Tetap simpan?')) return;
+  }
+  msg.textContent = '⏳ Menyimpan...';
+  const r = await api('/api/dash-admin?action=save-digital-product', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  const d = await r.json();
+  if (!d.ok) { msg.textContent = '❌ ' + d.error; return; }
+  const suksesTeks = '✅ Produk ' + d.id + ' tersimpan.';
+  digBaru();
+  msg.classList.remove('hidden'); msg.textContent = suksesTeks;
+  loadDigital();
+};
+
+document.getElementById('dgStokAdd').onclick = async () => {
+  if (!DIG_SEL) return alert('Pilih produk dulu');
+  const teks = document.getElementById('dgStokTeks').value;
+  if (!teks.trim()) return alert('Kotak stok masih kosong');
+  const msg = document.getElementById('dgStokMsg');
+  msg.classList.remove('hidden'); msg.textContent = '⏳ Menyimpan...';
+  const r = await api('/api/dash-admin?action=add-digital-stock', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ produk_id: DIG_SEL, teks }) });
+  const d = await r.json();
+  if (!d.ok) { msg.textContent = '❌ ' + d.error; return; }
+  msg.textContent = `✅ ${d.added} stok ditambahkan${d.dupes ? ` (${d.dupes} duplikat dilewati)` : ''}. Stok tersedia sekarang: ${d.sisa}`;
+  document.getElementById('dgStokTeks').value = '';
+  loadDigital();
+};
+
+async function digDelStok(id) {
+  if (!confirm('Hapus item stok ini?')) return;
+  const r = await api('/api/dash-admin?action=delete-digital-stock', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id }) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  loadDigital();
+}
+async function digDelProduk(id, nama) {
+  if (!confirm(`Hapus produk digital "${nama}" (${id})?\nStok yang masih tersedia ikut terhapus. Riwayat terjual tetap tersimpan.`)) return;
+  const r = await api('/api/dash-admin?action=delete-digital-product', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id }) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  if (DIG_SEL === id) { DIG_SEL = null; document.getElementById('dgStokBox').classList.add('hidden'); }
+  loadDigital();
 }
 
 /* ---------- boot ---------- */
