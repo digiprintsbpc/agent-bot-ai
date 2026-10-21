@@ -18,6 +18,7 @@ Tabel dan kolom yang tersedia:
 - products(id, nama, kategori, deskripsi, harga, stok, link_gambar)
 - customers(id, nama, nomor_wa, provinsi, kota_kabupaten, kecamatan, desa_kelurahan, patokan, kode_pos, alamat_lengkap)
 - order_summary(id, tanggal, nama_penerima, nomor_wa, nomor_resi, status, total_harga, jumlah_item, ringkasan_produk)
+- order_items(order_id, product_id, nama_produk, qty, harga_satuan) — isi barang per order; filter order_id "eq.INV-xxxxxx"
 
 Tugas: baca pertanyaan user (Bahasa Indonesia), keluarkan SATU objek JSON saja:
 {"queries": [{"table": "orders|products|customers|order_summary", "select": "kolom1,kolom2", "filter": {"kolom": "eq.nilai"}, "order": "kolom.desc", "limit": 20}]}
@@ -82,6 +83,47 @@ async function sbQuery({ table, select = '*', filter = {}, order, limit = 20 }) 
   throw lastErr;
 }
 
+const rp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
+
+/**
+ * Jawab pertanyaan tentang SATU invoice secara DETERMINISTIK (tanpa LLM):
+ * data selalu asli dari database, diformat oleh kode — tidak bisa mengarang.
+ */
+async function jawabInvoice(invId) {
+  const orders = await sbQuery({
+    table: 'orders',
+    select: 'id,tanggal,nama_penerima,nomor_wa,alamat_lengkap,nomor_resi,total_harga,status',
+    filter: { id: `eq.${invId}` }, limit: 1,
+  });
+  if (!orders.length) {
+    return `Invoice ${invId} tidak ditemukan di database. Pastikan nomornya benar ya.`;
+  }
+  const o = orders[0];
+  const items = await sbQuery({
+    table: 'order_items',
+    select: 'nama_produk,qty,harga_satuan',
+    filter: { order_id: `eq.${invId}` }, limit: 50,
+  }).catch(() => []);
+  const tgl = o.tanggal
+    ? new Date(o.tanggal).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '-';
+  let teks = `🧾 *Invoice ${o.id}*\n` +
+    `- Nama: ${o.nama_penerima || '-'}\n` +
+    `- Tanggal: ${tgl} WIB\n` +
+    `- Status: ${o.status}\n` +
+    `- Resi: ${o.nomor_resi || 'belum ada'}\n`;
+  if (items.length) {
+    const totalQty = items.reduce((a, i) => a + Number(i.qty || 0), 0);
+    teks += `\nIsi pesanan (${totalQty} unit):\n` + items.map((i, idx) =>
+      `${idx + 1}. ${i.nama_produk} ×${i.qty} @ ${rp(i.harga_satuan)} = ${rp(Number(i.qty || 0) * Number(i.harga_satuan || 0))}`
+    ).join('\n') + '\n';
+  } else {
+    teks += '\nIsi pesanan: (tidak ada rincian item)\n';
+  }
+  teks += `\n*Total: ${rp(o.total_harga)}*`;
+  return teks;
+}
+
 /**
  * Jawab pertanyaan toko. Mengembalikan { answer, usedDb }.
  * usedDb=false berarti pertanyaan tidak butuh data (sapaan/dll).
@@ -89,6 +131,18 @@ async function sbQuery({ table, select = '*', filter = {}, order, limit = 20 }) 
 async function answer(question) {
   if (!SB_URL || !SB_KEY || SB_KEY.includes('___ISI')) {
     throw new Error('SUPABASE_SERVICE_KEY belum diisi — skill toko butuh service_role key.');
+  }
+  // JALUR DETERMINISTIK: pertanyaan yang menyebut nomor invoice dijawab
+  // langsung dari database TANPA LLM (cegah "belum ada data" palsu & karangan isi pesanan).
+  const invMatch = String(question).match(/INV-\d{6}/i);
+  if (invMatch) {
+    const invId = invMatch[0].toUpperCase();
+    try {
+      return { answer: await jawabInvoice(invId), usedDb: true };
+    } catch (e) {
+      console.error('[toko] jawabInvoice gagal:', e.message);
+      return { answer: `Maaf, database sedang tidak bisa diakses untuk cek ${invId}. Coba lagi nanti ya.`, usedDb: true };
+    }
   }
   const planRaw = await chat(
     [
@@ -119,4 +173,4 @@ async function answer(question) {
   return { answer: answerText, usedDb: true };
 }
 
-module.exports = { answer, parsePlan };
+module.exports = { answer, parsePlan, jawabInvoice };
