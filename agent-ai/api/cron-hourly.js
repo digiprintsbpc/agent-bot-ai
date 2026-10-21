@@ -210,6 +210,51 @@ module.exports = async (req, res) => {
       }
     }
 
+    // ---- 6) PRODUK DIGITAL: Pengingat kedaluwarsa (H-2) + tawaran perpanjang ----
+    {
+      out.expireRemind = 0;
+      try {
+        const batasExp = new Date(now + 2 * 24 * 3600 * 1000).toISOString();
+        const r = await fetch(`${SB_URL}/rest/v1/stok_digital?status=eq.terjual&pengingat_terkirim=eq.false&kedaluwarsa_at=not.is.null&kedaluwarsa_at=lte.${encodeURIComponent(batasExp)}&select=id,produk_id,nomor_wa,kedaluwarsa_at&limit=50`, { headers: H });
+        const rows = r.ok ? await r.json() : [];
+        for (const it of rows) {
+          if (!it.nomor_wa) continue;
+          const rp2 = await fetch(`${SB_URL}/rest/v1/products?id=eq.${it.produk_id}&select=nama&limit=1`, { headers: H });
+          const pj = rp2.ok ? await rp2.json() : [];
+          const namaProduk = pj[0]?.nama || it.produk_id;
+          const tglExp = new Date(it.kedaluwarsa_at).toLocaleDateString('id-ID', { timeZone: 'Asia/Jakarta', day: 'numeric', month: 'long', year: 'numeric' });
+          await queueWA(it.nomor_wa, 'text',
+            `Halo kak! ⏰ *${namaProduk}* kakak akan berakhir pada *${tglExp}*.\n\nMau perpanjang? Balas chat ini aja, langsung kami bantu buatkan pesanannya 🙏`);
+          await fetch(`${SB_URL}/rest/v1/stok_digital?id=eq.${it.id}`, {
+            method: 'PATCH', headers: { ...H, Prefer: 'return=minimal' },
+            body: JSON.stringify({ pengingat_terkirim: true }),
+          }).catch(() => {});
+          out.expireRemind++;
+        }
+        if (out.expireRemind > 0 && OWNER_ID) {
+          await sendMessage(OWNER_ID, `⏰ *${out.expireRemind} pengingat kedaluwarsa* produk digital terkirim via WA.`, { parse_mode: 'Markdown' }).catch(() => {});
+        }
+      } catch (e) { console.error('[cron] pengingat digital gagal:', e.message); }
+    }
+
+    // ---- 7) PRODUK DIGITAL: Lepas kunci stok dari order pending basi (>24 jam) ----
+    {
+      out.lockRelease = 0;
+      try {
+        const batasLock = new Date(now - 24 * 3600 * 1000).toISOString();
+        const r = await fetch(`${SB_URL}/rest/v1/orders?status=eq.pending&select=id&tanggal=lt.${encodeURIComponent(batasLock)}&limit=100`, { headers: H });
+        const rows = r.ok ? await r.json() : [];
+        for (const o of rows) {
+          const rr = await fetch(`${SB_URL}/rest/v1/stok_digital?order_id=eq.${o.id}&status=eq.dikunci`, {
+            method: 'PATCH', headers: { ...H, Prefer: 'return=representation' },
+            body: JSON.stringify({ status: 'tersedia', order_id: null }),
+          });
+          const upd = rr.ok ? await rr.json().catch(() => []) : [];
+          if (Array.isArray(upd) && upd.length) out.lockRelease += upd.length;
+        }
+      } catch (e) { console.error('[cron] lepas kunci gagal:', e.message); }
+    }
+
     return res.status(200).json({ ok: true, ...out });
   } catch (e) {
     console.error('[cron-hourly]', e.message);

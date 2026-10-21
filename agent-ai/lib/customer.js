@@ -8,6 +8,7 @@
 const { chat } = require('./llm');
 const { sendMessage, sendPhoto } = require('./telegram-api');
 const payinaja = require('./payinaja');
+const digital = require('./digital');
 
 const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SB_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -105,12 +106,15 @@ async function claimConfirmSession(userId) {
 
 // ---------- Produk ----------
 async function getProducts() {
-  const rows = await sbGet('products', { select: 'id,nama,harga', order: 'nama' });
-  return rows;
+  try {
+    return await sbGet('products', { select: 'id,nama,harga,tipe,template_kirim,durasi_hari,garansi_hari', order: 'nama' });
+  } catch {
+    return sbGet('products', { select: 'id,nama,harga', order: 'nama' });
+  }
 }
 const rp = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
 function catalogText(products) {
-  return products.map((p) => `- ${p.nama} — ${rp(p.harga)}`).join('\n');
+  return products.map((p) => `- ${p.nama} — ${rp(p.harga)}${p.tipe === 'digital' ? ' [PRODUK DIGITAL: pengiriman instan setelah bayar, tanpa alamat/resi]' : ''}`).join('\n');
 }
 // Versi ringkas untuk ditampilkan ke pelanggan: dikelompokkan per ukuran
 function catalogCompact(products) {
@@ -131,6 +135,13 @@ function catalogCompact(products) {
     for (const r of rims) {
       const ply = r.nama.match(/(\d)ply/);
       lines.push(`• ${ply ? ply[1] + 'ply' : r.nama} — ${rp(r.harga)}`);
+    }
+  }
+  const digs = products.filter((p) => p.tipe === 'digital');
+  if (digs.length) {
+    lines.push(`*Produk Digital (kirim instan setelah bayar):*`);
+    for (const dg of digs) {
+      lines.push(`• ${dg.nama} — ${rp(dg.harga)}`);
     }
   }
   return lines.join('\n');
@@ -212,6 +223,18 @@ async function createOrder(draft) {
   const orderId = await genOrderId();
   const total = Math.round(Number(draft.harga) * Number(draft.qty));
 
+  // PRODUK DIGITAL: cek harga & stok dulu (tanpa stok → order tidak dibuat)
+  let digProduct = null;
+  if (draft.product_id) {
+    const gp = await digital.getDigitalProduct(draft.product_id).catch(() => null);
+    if (gp && gp.tipe === 'digital') digProduct = gp;
+  }
+  if (digProduct) {
+    if (!(Number(digProduct.harga) > 0)) return { hargaBelumDiatur: true, orderId: null };
+    const tersedia = await digital.countStock(digProduct.id).catch(() => 0);
+    if (tersedia < Number(draft.qty)) return { stockHabis: true, orderId: null, tersedia };
+  }
+
   // customer: cari by WA, buat bila belum ada
   let customerId = null;
   try {
@@ -241,6 +264,15 @@ async function createOrder(draft) {
     qty: Number(draft.qty),
     harga_satuan: Number(draft.harga),
   }]);
+
+  // PRODUK DIGITAL: kunci stok atas nama order ini (dikirim begitu bayar)
+  if (digProduct) {
+    const nKunci = await digital.lockStock(orderId, digProduct.id, Number(draft.qty)).catch(() => 0);
+    if (!nKunci) {
+      await sbPatch('orders', { id: `eq.${orderId}` }, { status: 'batal' }).catch(() => {});
+      return { stockHabis: true, orderId: null };
+    }
+  }
 
   // QRIS PayinAja
   let trxId = null;
@@ -313,6 +345,7 @@ async function handleCustomer(userId, text, onPhoto) {
   if (/^(batal|gak jadi|nggak jadi|cancel)$/i.test(q)) {
     if (d.order_id && session.step === 'awaiting_payment') {
       await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'batal' }).catch(() => {});
+      await digital.releaseLock(d.order_id).catch(() => {});
     }
     await clearSession(userId);
     return 'Baik kak, pesanan dibatalkan. Kalau butuh apa-apa, chat lagi aja ya 😊';
@@ -329,6 +362,12 @@ async function handleCustomer(userId, text, onPhoto) {
         if (o.status === 'pending' && o.payment_trx_id) {
           const cek = await payinaja.checkTransaction(o.payment_trx_id).catch(() => ({ ok: false }));
           if (cek.ok && cek.paid) {
+            // Order digital (ada stok terkunci): JANGAN ubah status di sini —
+            // panel akan mengirim kontennya ke WA & menutup order sebagai selesai.
+            const lockedInv = await digital.getLockedItems(o.id).catch(() => []);
+            if (lockedInv.length) {
+              return `📦 *${o.id}*\nTotal: ${rp(o.total_harga)}\nStatus: Sudah dibayar ✅ — pesanan digital kakak sedang dikirim otomatis ke WhatsApp.`;
+            }
             await sbPatch('orders', { id: `eq.${o.id}` }, { status: 'diproses' }).catch(() => {});
             o.status = 'diproses';
             if (OWNER_ID) {
@@ -378,10 +417,18 @@ async function handleCustomer(userId, text, onPhoto) {
       const res = await payinaja.checkTransaction(d.trx_id);
       if (res.ok && res.paid) {
         await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'diproses' }).catch(() => {});
+        // PRODUK DIGITAL: konten langsung dikirim di chat ini, status selesai
+        const terkirim = await digital.deliverLocked(d.order_id, d.phone).catch(() => null);
+        if (terkirim) {
+          await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'selesai' }).catch(() => {});
+        }
         await clearSession(userId);
         if (OWNER_ID) {
           await sendMessage(OWNER_ID,
-            `💰 *PEMBAYARAN MASUK!*\nInvoice: ${d.order_id}\nTotal: ${rp(d.amount)}\nPelanggan: ${d.name} (${d.phone})`).catch(() => {});
+            `💰 *PEMBAYARAN MASUK!*\nInvoice: ${d.order_id}\nTotal: ${rp(d.amount)}\nPelanggan: ${d.name} (${d.phone})${terkirim ? '\n📩 Produk digital sudah terkirim otomatis' : ''}`).catch(() => {});
+        }
+        if (terkirim) {
+          return `✅ Pembayaran *${d.order_id}* diterima! Ini pesanan digital kakak 👇\n\n${terkirim.map((t) => t.message).join('\n\n———\n\n')}\n\nTerima kasih kak 🙏 Simpan baik-baik data di atas ya.`;
         }
         return `✅ Pembayaran *${d.order_id}* diterima! Pesananmu sedang diproses ya kak. Terima kasih 🙏`;
       }
@@ -392,6 +439,7 @@ async function handleCustomer(userId, text, onPhoto) {
     // Pesanan lama TIDAK dibatalkan diam-diam — hanya bila customer memilih PESAN BARU.
     if (/^(pesan baru|buat baru|mulai baru|order baru)$/i.test(q)) {
       await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'batal' }).catch(() => {});
+      await digital.releaseLock(d.order_id).catch(() => {});
       await clearSession(userId);
       return 'Baik kak, pesanan lama sudah dibatalkan. Mau pesan produk apa? 😊';
     }
@@ -419,6 +467,14 @@ async function handleCustomer(userId, text, onPhoto) {
       if (!claimed) return 'Pesananmu sedang diproses ya kak, tunggu sebentar 😊';
       try {
         const r = await createOrder(d);
+        if (r.stockHabis) {
+          await saveSession(userId, 'collecting', {});
+          return 'Maaf kak, stok produk digital ini sedang habis 🙏 Coba produk lain atau hubungi admin ya.';
+        }
+        if (r.hargaBelumDiatur) {
+          await saveSession(userId, 'collecting', {});
+          return 'Maaf kak, produk ini belum bisa dipesan saat ini. Hubungi admin ya 🙏';
+        }
         if (OWNER_ID) {
           await sendMessage(OWNER_ID,
             `🛒 *PESANAN BARU* (via Agent)\nInvoice: ${r.orderId}\n${d.product_nama} × ${d.qty} = ${rp(r.total)}\nPelanggan: ${d.name} (${d.phone})\nStatus: Belum Bayar 🔴`).catch(() => {});
@@ -594,6 +650,7 @@ async function handleCustomerPhoto(userId, fileId) {
   await logActivitySafe('bukti', `Bukti transfer ${d.order_id}: terbaca ${rp(read)} ${cocok ? '(cocok)' : '(beda)'}`);
   if (cocok) {
     // OTOMATIS: konfirmasi pembayaran → kirim invoice ke customer + notif ke admin WA
+    let digMsg = null;
     try {
       const SB_URL2 = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
       const SB_KEY2 = process.env.SUPABASE_SERVICE_KEY || '';
@@ -603,6 +660,12 @@ async function handleCustomerPhoto(userId, fileId) {
         method: 'PATCH', headers: H,
         body: JSON.stringify({ status: 'diproses' }),
       }).catch(() => {});
+      // 1b. PRODUK DIGITAL: kirim konten langsung, status selesai
+      const terkirimFoto = await digital.deliverLocked(d.order_id, d.phone).catch(() => null);
+      if (terkirimFoto) {
+        await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'selesai' }).catch(() => {});
+        digMsg = terkirimFoto.map((t) => t.message).join('\n\n———\n\n');
+      }
       // 2. Generate & upload invoice
       const { generateInvoice } = require('./invoice');
       const orders = await (async () => {
@@ -642,7 +705,9 @@ async function handleCustomerPhoto(userId, fileId) {
       await clearSession(userId).catch(() => {});
       await logActivitySafe('bayar_otomatis', `Order ${d.order_id} auto-konfirmasi, invoice terkirim.`);
     } catch (e) { console.error('[auto-bayar]', e.message); }
-    return `Pembayaran terkonfirmasi otomatis kak! ✅ (${rp(read)})\nInvoice sudah dikirim ke WA kakak. Pesanan segera diproses ya 🙏`;
+    return digMsg
+      ? `Pembayaran terkonfirmasi otomatis kak! ✅ (${rp(read)})\n\nIni pesanan digital kakak 👇\n\n${digMsg}\n\nSimpan baik-baik ya kak 🙏`
+      : `Pembayaran terkonfirmasi otomatis kak! ✅ (${rp(read)})\nInvoice sudah dikirim ke WA kakak. Pesanan segera diproses ya 🙏`;
   }
   return `Bukti diterima kak, tapi nominal yang terbaca (${read ? rp(read) : 'tidak jelas'}) berbeda dengan total ${rp(total)}. Admin akan cek manual ya kak 🙏`;
 }
