@@ -264,6 +264,10 @@ body.lapang .cards { opacity: .92; }
   box-shadow: 0 10px 30px rgba(24, 94, 62, .45); animation: pesanPop .35s ease both; }
 #btnPesan:hover { background: #27855c; }
 @keyframes pesanPop { from { opacity: 0; transform: translate(-50%, 12px); } to { opacity: 1; transform: translate(-50%, 0); } }
+#btnKamera { position: fixed; top: 14px; right: 14px; z-index: 40; border: 1px solid var(--line); cursor: pointer;
+  background: rgba(255,255,255,.9); color: var(--text); font: 600 12.5px var(--sans); padding: 9px 14px; border-radius: 99px;
+  box-shadow: 0 4px 14px rgba(60,45,25,.12); backdrop-filter: blur(8px); }
+#btnKamera:hover { background: #fff; }
 .petunjuk { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 30; background: rgba(255,255,255,.88);
   border: 1px solid var(--line); border-radius: 99px; padding: 7px 16px; font-size: 12.5px; color: var(--muted); white-space: nowrap;
   backdrop-filter: blur(8px); }
@@ -328,8 +332,9 @@ body.lapang .cards { opacity: .92; }
 
 <!-- UI Tamu: tombol pesan (muncul dekat meja Toko), joystick, petunjuk -->
 <button id="btnPesan" type="button" hidden>🛒 Pesan di Meja Toko</button>
+<button id="btnKamera" type="button">👀 Lihat Kantor dari Atas</button>
 <div id="joy" aria-hidden="true"><div id="joyKnob"></div></div>
-<div class="petunjuk">Gerak: <b>W A S D</b> / tombol panah · Dekati meja <b>Toko</b> untuk memesan</div>
+<div class="petunjuk"><b>W</b> maju · <b>A/D</b> belok · <b>S</b> mundur · seret layar untuk menoleh · dekati meja <b>Toko</b> untuk memesan</div>
 
 <!-- Panel pemesanan -->
 <div class="pesan-overlay" id="pesanOverlay" hidden>
@@ -343,7 +348,7 @@ body.lapang .cards { opacity: .92; }
 
 <script>window.KANTOR = {"title":"Digiprint Agent AI","ketua":"Lexa","team":["Ngobrol","Toko","Security","Catatan"],"colors":{"ketua":"#6a55c9","team":["#3f6fd1","#2f9a6d","#d9772f","#c2417a"],"freelancers":[]},"spare_desks":0};
 window.KANTOR_MODE = 'tamu';</script>
-<script type="module" src="/kerja/assets/kantor.js?v=101"></script>
+<script type="module" src="/kerja/assets/kantor.js?v=102"></script>
 <script src="/kunjungi/tamu.js" defer></script>
 </body>
 </html>

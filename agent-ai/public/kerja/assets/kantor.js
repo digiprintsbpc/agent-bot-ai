@@ -2521,14 +2521,17 @@ function updateActor(a, dt, t, now) {
   }
 }
 // ---------------------------------------------------------------- mode tamu (customer)
-// Karakter tamu dikendalikan pemain: WASD / tombol panah / joystick sentuh
-// (window.__tamuJoy dari halaman). Dekati meja Toko → tombol pesan muncul
-// (elemen #btnPesan milik halaman). Rayakan pembayaran via __tamuRayakan().
+// FPP (first person): kamera = mata tamu. W/↑ maju, S/↓ mundur, A/D atau
+// ←/→ belok, seret layar untuk menoleh, joystick sentuh (atas = maju,
+// kiri/kanan = belok). Mode "atas" (± __tamuKameraMode('atas')) menampilkan
+// kantor dari kamera bebas seperti biasa + karakter tamu terlihat.
+// Dekati meja Toko → tombol pesan (#btnPesan milik halaman) muncul.
 const TAMU_KEYS = {};
 let tamuA = null;
 let tamuJoy = { x: 0, y: 0 };
 let tamuDekat = false;
 let tamuSapaAt = 0;
+let tamuFPP = true;
 const TOKO_IDX = TEAM_NAMES.indexOf('Toko');
 const TOKO_FRONT = TOKO_IDX >= 0 ? { x: DESK_DEFS[TOKO_IDX + 1].x, z: -2.5 } : null;
 const TAMU_BLOCKS = [
@@ -2548,33 +2551,50 @@ function spawnTamu() {
     look: { shirt: '#e2574c', pants: '#2e3a46', skin: '#c68a5e', hair: '#191310', hairStyle: 'short' },
   });
   tamuA.p.root.position.set(ROOM.x0 + 1.3, 0, CORRIDOR_Z);
-  tamuA.heading = Math.PI / 2;
+  tamuA.heading = Math.PI / 2; // menghadap ke dalam kantor
   tamuA.work = true;
-  try { focusOn('tamu'); } catch { /* abaikan */ }
-  setTimeout(() => { if (tamuA) say(tamuA, 'Halo! Aku jalan-jalan dulu ya 👋', 3600, 'hi'); }, 700);
+  tamuTerapkanMode();
+  setTimeout(() => { if (tamuA) say(tamuA, 'Halo! Aku jalan-jalan dulu ya \u{1F44B}', 3600, 'hi'); }, 700);
   setTimeout(() => {
     const tk = TEAM[TOKO_IDX];
-    if (tk) say(tk, 'Selamat datang di Digiprint! Mau pesan? Ke meja saya ya 😊', 5000, 'hi');
+    if (tk) say(tk, 'Selamat datang di Digiprint! Mau pesan? Ke meja saya ya \u{1F60A}', 5000, 'hi');
   }, 1800);
+}
+function tamuTerapkanMode() {
+  if (!tamuA) return;
+  tamuA.p.root.visible = !tamuFPP;
+  tamuA.label.visible = !tamuFPP;
+  controls.enabled = !tamuFPP;
+  if (!tamuFPP) {
+    tween = { t: 0, p0: camera.position.clone(), t0: controls.target.clone(), p1: HOME.pos.clone(), t1: HOME.target.clone() };
+  }
+}
+function tamuKamera() {
+  if (!tamuA) return;
+  const p = tamuA.p.root.position;
+  const h = tamuA.heading;
+  camera.position.set(p.x, 1.58, p.z);
+  camera.lookAt(p.x + Math.sin(h), 1.42, p.z + Math.cos(h));
 }
 function tamuTick(dt, t, now) {
   if (!tamuA) { spawnTamu(); if (!tamuA) return; }
   const a = tamuA;
   const root = a.p.root;
-  let dx = (TAMU_KEYS.d ? 1 : 0) - (TAMU_KEYS.a ? 1 : 0) + tamuJoy.x;
-  let dz = (TAMU_KEYS.s ? 1 : 0) - (TAMU_KEYS.w ? 1 : 0) + tamuJoy.y;
-  const len = Math.hypot(dx, dz);
+  // belok: A/D atau sumbu-x joystick (kiri = heading naik = belok kiri)
+  const turnIn = (TAMU_KEYS.a ? 1 : 0) - (TAMU_KEYS.d ? 1 : 0) - tamuJoy.x;
+  if (turnIn) a.heading += THREE.MathUtils.clamp(turnIn, -1, 1) * 2.3 * dt;
+  // maju/mundur: W/S atau sumbu-y joystick (atas = maju)
+  const fwd = (TAMU_KEYS.w ? 1 : 0) - (TAMU_KEYS.s ? 1 : 0) - tamuJoy.y;
   let moving = false;
-  if (len > 0.15) {
-    dx /= Math.max(1, len);
-    dz /= Math.max(1, len);
-    const sp = 2.1 * dt;
-    const nx = THREE.MathUtils.clamp(root.position.x + dx * sp, ROOM.x0 + 0.45, ROOM.x1 - 0.45);
-    const nz = THREE.MathUtils.clamp(root.position.z + dz * sp, ROOM.z0 + 0.45, ROOM.z1 - 0.45);
+  if (Math.abs(fwd) > 0.12) {
+    const sp = 2.1 * dt * THREE.MathUtils.clamp(fwd, -1, 1);
+    const fx = Math.sin(a.heading);
+    const fz = Math.cos(a.heading);
+    const nx = THREE.MathUtils.clamp(root.position.x + fx * sp, ROOM.x0 + 0.45, ROOM.x1 - 0.45);
+    const nz = THREE.MathUtils.clamp(root.position.z + fz * sp, ROOM.z0 + 0.45, ROOM.z1 - 0.45);
     if (!tamuBlocked(nx, root.position.z)) root.position.x = nx;
     if (!tamuBlocked(root.position.x, nz)) root.position.z = nz;
-    a.heading = turnTo(a.heading, Math.atan2(dx, dz), dt * 10);
-    a.phase += dt * 8.5;
+    a.phase += dt * 8.5 * Math.sign(fwd);
     moving = true;
   }
   root.rotation.y = a.heading;
@@ -2596,7 +2616,7 @@ function tamuTick(dt, t, now) {
       if (btn) btn.hidden = !near;
       if (near && now > tamuSapaAt) {
         const tk = TEAM[TOKO_IDX];
-        if (tk) say(tk, 'Halo kak! Mau pesan? Klik tombol 🛒 di bawah ya', 4200, 'hi');
+        if (tk) say(tk, 'Halo kak! Mau pesan? Klik tombol \u{1F6D2} di bawah ya', 4200, 'hi');
         tamuSapaAt = now + 15000;
       }
     }
@@ -2615,11 +2635,24 @@ if (TAMU) {
     const k = keyMap[String(e.key).toLowerCase()];
     if (k) TAMU_KEYS[k] = false;
   });
+  // seret pada kanvas = menoleh (FPP)
+  let lookX = null;
+  renderer.domElement.addEventListener('pointerdown', (e) => { lookX = e.clientX; });
+  renderer.domElement.addEventListener('pointermove', (e) => {
+    if (lookX === null || !tamuFPP || !tamuA) return;
+    tamuA.heading -= (e.clientX - lookX) * 0.0052;
+    lookX = e.clientX;
+  });
+  addEventListener('pointerup', () => { lookX = null; });
   window.__tamuJoy = (x, y) => { tamuJoy = { x, y }; };
+  window.__tamuKameraMode = (mode) => {
+    tamuFPP = mode !== 'atas';
+    tamuTerapkanMode();
+  };
   window.__tamuRayakan = () => {
     const tk = TEAM[TOKO_IDX];
-    if (tk) say(tk, 'Pembayaran diterima. Terima kasih kak! Pesanannya kami siapkan 🎉', 6000, 'hi');
-    if (tamuA) say(tamuA, 'Yeay, berhasil pesan! 🎉', 4000, 'hi');
+    if (tk) say(tk, 'Pembayaran diterima. Terima kasih kak! Pesanannya kami siapkan \u{1F389}', 6000, 'hi');
+    if (tamuA) say(tamuA, 'Yeay, berhasil pesan! \u{1F389}', 4000, 'hi');
   };
 }
 
@@ -2673,6 +2706,7 @@ function frame() {
   controls.target.z = THREE.MathUtils.clamp(controls.target.z, ROOM.z0 + 1, ROOM.z1 - 1);
   controls.target.y = THREE.MathUtils.clamp(controls.target.y, 0.3, 3.5);
   controls.update();
+  if (TAMU && tamuFPP) tamuKamera(); // FPP: kamera menempel di mata tamu
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
 }

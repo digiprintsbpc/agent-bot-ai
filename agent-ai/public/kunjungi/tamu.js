@@ -30,6 +30,15 @@
     joy.addEventListener('pointercancel', end);
   }
 
+  // ---------------- ganti kamera (FPP <-> dari atas) ----------------
+  const btnKamera = $('btnKamera');
+  let modeAtas = false;
+  if (btnKamera) btnKamera.addEventListener('click', () => {
+    modeAtas = !modeAtas;
+    if (window.__tamuKameraMode) window.__tamuKameraMode(modeAtas ? 'atas' : 'fpp');
+    btnKamera.textContent = modeAtas ? '🚶 Kembali Jalan Sendiri' : '👀 Lihat Kantor dari Atas';
+  });
+
   // ---------------- panel pemesanan ----------------
   const overlay = $('pesanOverlay');
   const isi = $('pesanIsi');
