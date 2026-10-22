@@ -538,7 +538,7 @@ async function handleCallback(chatId, msgId, data, queryId) {
     if (action === 'dec' && count > 1) count--;
     if (action === 'inc') count++;
     if (action === 'gen') {
-      let txt = `📋 *TEMPLATE ORDER*\nNama Penerima: \nNomor wa Penerima: \nAlamat lengkap: \n`;
+      let txt = `📋 *TEMPLATE ORDER*\nNama Penerima: \nNomor wa Penerima: \nAlamat lengkap: \nMetode Pembayaran: (QRIS / Bayar di Toko)\nOngkir: \n`;
       for (let i = 0; i < count; i++) txt += `Detail Pesanan ${i + 1}\nNama Produk: \nqty: \nHarga satuan: \n`;
       await tg.sendMessage(chatId, txt, MD);
       return true;
@@ -852,7 +852,7 @@ async function handleMessage(chatId, msg) {
       } catch (e) { console.error('[template] gagal ambil:', e.message); }
       // Fallback jika tabel belum ada
       if (!template) {
-        template = `📋 *TEMPLATE ORDER*\nNama Penerima: \nNomor wa Penerima: \nAlamat lengkap: \nDetail Pesanan 1\nNama Produk: \nqty: \nHarga satuan: `;
+        template = `📋 *TEMPLATE ORDER*\nNama Penerima: \nNomor wa Penerima: \nAlamat lengkap: \nMetode Pembayaran: (QRIS / Bayar di Toko)\nOngkir: \nDetail Pesanan 1\nNama Produk: \nqty: \nHarga satuan: `;
       }
       // Jika minta >1 produk, duplikat bagian detail
       let txt = template;
@@ -1659,6 +1659,10 @@ async function handleTemplateOrder(chatId, text) {
     const subtotal = q * h; totalKeseluruhan += subtotal;
     detailStruk += `• ${prod[i][1].trim()} (${q}x) = ${rp(subtotal)}\n`;
   }
+  // Ongkir (opsional): baris "Ongkir: <nominal>" pada form — ambil angkanya saja,
+  // HANYA dari baris yang sama (baris kosong tidak boleh menyerap baris berikutnya)
+  const ongkirMatch = text.match(/Ongkir:[ \t]*([^\n]*)/i);
+  const ongkir = ongkirMatch ? (parseInt(String(ongkirMatch[1]).replace(/[^0-9]/g, ''), 10) || 0) : 0;
   // --- PRODUK DIGITAL: deteksi & normalisasi dari katalog ---
   let digItems = null; // [{product, qty}] bila order ini digital murni
   {
@@ -1693,6 +1697,12 @@ async function handleTemplateOrder(chatId, text) {
       }
     }
   }
+  // Ongkir hanya untuk order fisik (produk digital terkirim via WA — tanpa ongkir)
+  const ongkirAktif = (!digItems && ongkir > 0) ? ongkir : 0;
+  if (ongkirAktif) {
+    totalKeseluruhan += ongkirAktif;
+    detailStruk += `• Ongkir = ${rp(ongkirAktif)}\n`;
+  }
   try {
     // Jika bayar di toko: langsung diproses, kirim invoice PDF (tanpa QRIS)
     if (bayarDiToko) {
@@ -1705,6 +1715,9 @@ async function handleTemplateOrder(chatId, text) {
         const diIt = digItems ? digItems[i] : null;
         await sbPost('order_items', [{ order_id: idPesanan, product_id: diIt ? diIt.product.id : undefined, nama_produk: diIt ? diIt.product.nama : prod[i][1].trim(), qty: diIt ? diIt.qty : q, harga_satuan: diIt ? Number(diIt.product.harga || 0) : h }], 'return=minimal').catch(() => {});
       }
+      if (ongkirAktif) {
+        await sbPost('order_items', [{ order_id: idPesanan, nama_produk: 'Ongkir', qty: 1, harga_satuan: ongkirAktif }], 'return=minimal').catch(() => {});
+      }
       // Generate & kirim invoice PDF
       try {
         const { generateInvoice } = require('./invoice');
@@ -1714,6 +1727,7 @@ async function handleTemplateOrder(chatId, text) {
           qty: parseInt(qty[i][1], 10) || 0,
           harga_satuan: parseInt(String(hrg[i][1]).replace(/[^0-9]/g, ''), 10) || 0,
         }));
+        if (ongkirAktif) items.push({ nama_produk: 'Ongkir', qty: 1, harga_satuan: ongkirAktif });
         const pdfBuffer = await generateInvoice({
           id: idPesanan, tanggal: new Date().toISOString(), nama_penerima: namaPenerima,
           nomor_wa: nowa, alamat_lengkap: alamatPenerima, total_harga: totalKeseluruhan,
@@ -1763,6 +1777,9 @@ async function handleTemplateOrder(chatId, text) {
       const q = parseInt(qty[i][1], 10) || 0; const h = parseInt(String(hrg[i][1]).replace(/[^0-9]/g, ''), 10) || 0;
       const diIt = digItems ? digItems[i] : null;
       await sbPost('order_items', [{ order_id: idPesanan, product_id: diIt ? diIt.product.id : undefined, nama_produk: diIt ? diIt.product.nama : prod[i][1].trim(), qty: diIt ? diIt.qty : q, harga_satuan: diIt ? Number(diIt.product.harga || 0) : h }], 'return=minimal').catch(() => {});
+    }
+    if (ongkirAktif) {
+      await sbPost('order_items', [{ order_id: idPesanan, nama_produk: 'Ongkir', qty: 1, harga_satuan: ongkirAktif }], 'return=minimal').catch(() => {});
     }
     // Produk digital: kunci stok utk order ini (konten dikirim panel begitu bayar terdeteksi)
     if (digItems) {
