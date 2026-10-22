@@ -11,6 +11,9 @@ const API = '/api/kantor-state';
 const POLL_MS = 3000;
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const CFG = window.KANTOR || {};
+// Mode TAMU: halaman publik untuk customer (jalan-jalan + pesan di meja Toko).
+// Data yang dimuat versi tersanitasi (?publik=1) — tanpa aktivitas/order nyata.
+const TAMU = window.KANTOR_MODE === 'tamu' || new URLSearchParams(location.search).has('tamu');
 const TEAM_NAMES = Array.isArray(CFG.team) && CFG.team.length === 4 ? CFG.team : ['Budi', 'Sari', 'Agus', 'Rina'];
 const KETUA_NAME = typeof CFG.ketua === 'string' ? CFG.ketua : 'Joko';
 const COLORS = CFG.colors || { ketua: '#6a55c9', team: ['#3f6fd1', '#2f9a6d', '#d9772f', '#c2417a'], freelancers: ['#0f8fa3'] };
@@ -2036,7 +2039,7 @@ const prev = new Map(); // key → {state, runId}
 
 async function poll() {
   try {
-    const r = await fetch(API, { cache: 'no-store' });
+    const r = await fetch(TAMU ? API + '?publik=1' : API, { cache: 'no-store' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     if (!d || d.app !== 'kantor-agent') throw new Error('respons tidak dikenal');
@@ -2350,6 +2353,7 @@ const pointer = new THREE.Vector2();
 let downAt = null;
 renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; tween = null; });
 renderer.domElement.addEventListener('pointerup', (e) => {
+  if (TAMU) return; // tamu: klik tidak membuka popup/fokus data
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
   const hit = pick(e);
   if (hit?.userData.objKey) showObjPopup(hit.userData.objKey);
@@ -2371,6 +2375,7 @@ function pick(e) {
 
 // Popup detail objek (komputer / whiteboard)
 function showObjPopup(objKey) {
+  if (TAMU) return; // popup berisi data kantor — tidak untuk tamu
   const popup = document.getElementById('objPopup');
   const title = document.getElementById('objTitle');
   const content = document.getElementById('objContent');
@@ -2461,6 +2466,7 @@ let lastSec = 0;
 let gameAt = 0;
 let tvMode = 'tv';
 function updateActor(a, dt, t, now) {
+  if (a.kind === 'tamu') return; // tamu digerakkan tamuTick() (kontrol pemain)
   // pilih tempat santai baru bila waktunya
   if (!a.work && !a.leaving && a.kind !== 'freelancer' && !a.walking) lounge(a, now, false);
   const root = a.p.root;
@@ -2514,6 +2520,109 @@ function updateActor(a, dt, t, now) {
     if (b.textContent !== text) b.textContent = text;
   }
 }
+// ---------------------------------------------------------------- mode tamu (customer)
+// Karakter tamu dikendalikan pemain: WASD / tombol panah / joystick sentuh
+// (window.__tamuJoy dari halaman). Dekati meja Toko → tombol pesan muncul
+// (elemen #btnPesan milik halaman). Rayakan pembayaran via __tamuRayakan().
+const TAMU_KEYS = {};
+let tamuA = null;
+let tamuJoy = { x: 0, y: 0 };
+let tamuDekat = false;
+let tamuSapaAt = 0;
+const TOKO_IDX = TEAM_NAMES.indexOf('Toko');
+const TOKO_FRONT = TOKO_IDX >= 0 ? { x: DESK_DEFS[TOKO_IDX + 1].x, z: -2.5 } : null;
+const TAMU_BLOCKS = [
+  ...TEAM_NAMES.map((_, i) => ({ x0: DESK_DEFS[i + 1].x - 1.25, x1: DESK_DEFS[i + 1].x + 1.25, z0: -4.95, z1: -2.98 })),
+  { x0: GLASS.x0 - 0.15, x1: GLASS.x1 + 0.15, z0: GLASS.z0 - 0.15, z1: GLASS.z1 + 0.15 },
+  { x0: -7.4, x1: -3.0, z0: 1.8, z1: 5.6 },
+  { x0: 3.3, x1: 6.5, z0: 0.3, z1: 1.9 },
+  { x0: -9.6, x1: -6.8, z0: -6.4, z1: -4.8 },
+  { x0: -9.7, x1: -8.1, z0: 3.0, z1: 4.6 },
+];
+function tamuBlocked(x, z) {
+  return TAMU_BLOCKS.some((b) => x > b.x0 && x < b.x1 && z > b.z0 && z < b.z1);
+}
+function spawnTamu() {
+  tamuA = makeActor({
+    key: 'tamu', kind: 'tamu', name: 'Tamu', role: 'Pengunjung', color: '#e2574c',
+    look: { shirt: '#e2574c', pants: '#2e3a46', skin: '#c68a5e', hair: '#191310', hairStyle: 'short' },
+  });
+  tamuA.p.root.position.set(ROOM.x0 + 1.3, 0, CORRIDOR_Z);
+  tamuA.heading = Math.PI / 2;
+  tamuA.work = true;
+  try { focusOn('tamu'); } catch { /* abaikan */ }
+  setTimeout(() => { if (tamuA) say(tamuA, 'Halo! Aku jalan-jalan dulu ya 👋', 3600, 'hi'); }, 700);
+  setTimeout(() => {
+    const tk = TEAM[TOKO_IDX];
+    if (tk) say(tk, 'Selamat datang di Digiprint! Mau pesan? Ke meja saya ya 😊', 5000, 'hi');
+  }, 1800);
+}
+function tamuTick(dt, t, now) {
+  if (!tamuA) { spawnTamu(); if (!tamuA) return; }
+  const a = tamuA;
+  const root = a.p.root;
+  let dx = (TAMU_KEYS.d ? 1 : 0) - (TAMU_KEYS.a ? 1 : 0) + tamuJoy.x;
+  let dz = (TAMU_KEYS.s ? 1 : 0) - (TAMU_KEYS.w ? 1 : 0) + tamuJoy.y;
+  const len = Math.hypot(dx, dz);
+  let moving = false;
+  if (len > 0.15) {
+    dx /= Math.max(1, len);
+    dz /= Math.max(1, len);
+    const sp = 2.1 * dt;
+    const nx = THREE.MathUtils.clamp(root.position.x + dx * sp, ROOM.x0 + 0.45, ROOM.x1 - 0.45);
+    const nz = THREE.MathUtils.clamp(root.position.z + dz * sp, ROOM.z0 + 0.45, ROOM.z1 - 0.45);
+    if (!tamuBlocked(nx, root.position.z)) root.position.x = nx;
+    if (!tamuBlocked(root.position.x, nz)) root.position.z = nz;
+    a.heading = turnTo(a.heading, Math.atan2(dx, dz), dt * 10);
+    a.phase += dt * 8.5;
+    moving = true;
+  }
+  root.rotation.y = a.heading;
+  applyPose(a.p, moving ? walkPose(a) : { hipsY: 0.9, lHipX: 0, rHipX: 0, lKneeX: 0, rKneeX: 0, headY: Math.sin(t * 0.7) * 0.08 }, dt);
+  a.p.head.getWorldPosition(tmpV);
+  a.label.position.set(tmpV.x, tmpV.y + 0.42, tmpV.z);
+  a.el.classList.toggle('out', tmpV.x < ROOM.x0 - 0.05);
+  const b = a.bubbleEl;
+  if (now < a.bubble.until) {
+    const c = `bubble ${a.bubble.cls}`.trim();
+    if (b.className !== c) b.className = c;
+    if (b.textContent !== a.bubble.text) b.textContent = a.bubble.text;
+  } else if (b.className !== 'bubble hide') b.className = 'bubble hide';
+  if (TOKO_FRONT) {
+    const near = Math.hypot(root.position.x - TOKO_FRONT.x, root.position.z - TOKO_FRONT.z) < 1.25;
+    if (near !== tamuDekat) {
+      tamuDekat = near;
+      const btn = $('btnPesan');
+      if (btn) btn.hidden = !near;
+      if (near && now > tamuSapaAt) {
+        const tk = TEAM[TOKO_IDX];
+        if (tk) say(tk, 'Halo kak! Mau pesan? Klik tombol 🛒 di bawah ya', 4200, 'hi');
+        tamuSapaAt = now + 15000;
+      }
+    }
+  }
+}
+if (TAMU) {
+  const keyMap = { w: 'w', a: 'a', s: 's', d: 'd', arrowup: 'w', arrowdown: 's', arrowleft: 'a', arrowright: 'd' };
+  addEventListener('keydown', (e) => {
+    const k = keyMap[String(e.key).toLowerCase()];
+    if (!k) return;
+    if (e.target.closest('input, textarea, select, [contenteditable]')) return;
+    TAMU_KEYS[k] = true;
+    if (String(e.key).startsWith('Arrow')) e.preventDefault();
+  });
+  addEventListener('keyup', (e) => {
+    const k = keyMap[String(e.key).toLowerCase()];
+    if (k) TAMU_KEYS[k] = false;
+  });
+  window.__tamuJoy = (x, y) => { tamuJoy = { x, y }; };
+  window.__tamuRayakan = () => {
+    const tk = TEAM[TOKO_IDX];
+    if (tk) say(tk, 'Pembayaran diterima. Terima kasih kak! Pesanannya kami siapkan 🎉', 6000, 'hi');
+    if (tamuA) say(tamuA, 'Yeay, berhasil pesan! 🎉', 4000, 'hi');
+  };
+}
+
 function frame() {
   requestAnimationFrame(frame);
   if (document.hidden) return;
@@ -2529,6 +2638,7 @@ function frame() {
     updateActor(a, dt, t, now);
     if (a.gone && a.kind === 'freelancer') removeActor(a);
   }
+  if (TAMU) tamuTick(dt, t, now);
   for (const d of Object.values(desks)) updateDeskScreens(d, now);
   if (!REDUCED) chatter(now);
   // pintu terbuka saat ada yang dekat

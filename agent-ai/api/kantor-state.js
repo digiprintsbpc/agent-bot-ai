@@ -151,8 +151,38 @@ function buildState(events) {
   };
 }
 
+/**
+ * State PUBLIK untuk mode tamu (kantor 3D yang dimasuki customer):
+ * bentuk sama persis, tapi TANPA data aktivitas nyata apa pun —
+ * semua task generik, feed & runs kosong. Toko dibuat "bekerja"
+ * (duduk di mejanya) agar siap melayani tamu; lainnya santai.
+ */
+function buildStatePublik() {
+  const base = buildState([]);
+  const iso = new Date().toISOString();
+  base.team = base.team.map((m) => {
+    if (m.name !== 'Toko') return { ...m, state: 'santai', run: null };
+    return {
+      ...m, state: 'bekerja',
+      run: {
+        id: 'publik-toko', agent_type: 'toko', task: 'Melayani pelanggan',
+        status: 'bekerja', reason: null, segment: 1,
+        started: iso, ended: null, updated: iso, last: [], files: [], tools: 0, tokens: 0,
+      },
+    };
+  });
+  base.ketua = { ...base.ketua, state: 'santai', activity: null, waiting_on: 1 };
+  base.feed = [];
+  base.runs = [];
+  base.stats = { active: 1, freelancers: 0, total: 0, recent_starts: [], sessions_active: 1 };
+  return base;
+}
+
 module.exports = async (req, res) => {
   try {
+    if (String(req.query?.publik || '') === '1') {
+      return res.status(200).json(buildStatePublik());
+    }
     const events = await getActivities(80);
     res.status(200).json(buildState(events));
   } catch (e) {
@@ -162,5 +192,6 @@ module.exports = async (req, res) => {
 
 // untuk tes lokal
 module.exports.buildState = buildState;
+module.exports.buildStatePublik = buildStatePublik;
 module.exports.TEAM = TEAM;
 module.exports.KETUA = KETUA;
