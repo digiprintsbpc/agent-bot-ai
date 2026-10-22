@@ -886,7 +886,12 @@ async function handleMessage(chatId, msg) {
   if (step === 'broadcast_confirm') {
     if (/^(ya|iya|oke|ok|lanjut|kirim)$/i.test(input)) {
       await handleBroadcastExec(chatId, d.pesan || '');
+    } else {
+      await clearAdminState(chatId);
+      await tg.sendMessage(chatId, '🚫 Broadcast dibatalkan.', MD);
     }
+    return true;
+  }
 
   // --- PRODUK DIGITAL: tambah produk (berjenjang) ---
   if (step === 'dig_nama') {
@@ -1020,11 +1025,6 @@ async function handleMessage(chatId, msg) {
       await tg.sendMessage(chatId, '🚫 Dibatalkan.', MD);
     }
     await clearAdminState(chatId);
-    return true;
-  } else {
-      await clearAdminState(chatId);
-      await tg.sendMessage(chatId, '🚫 *Broadcast dibatalkan.*', MD);
-    }
     return true;
   }
 
