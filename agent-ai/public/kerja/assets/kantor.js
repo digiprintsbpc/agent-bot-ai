@@ -2039,7 +2039,24 @@ const prev = new Map(); // key → {state, runId}
 
 async function poll() {
   try {
-    const r = await fetch(TAMU ? API + '?publik=1' : API, { cache: 'no-store' });
+    // Mode admin: state penuh berisi data privat → wajib PIN dashboard
+    // (disimpan di sessionStorage; diminta sekali saat server menolak).
+    let url = TAMU ? API + '?publik=1' : API;
+    if (!TAMU) {
+      let pin = '';
+      try { pin = sessionStorage.getItem('kantor.pin') || ''; } catch { /* abaikan */ }
+      if (pin) url += '?pin=' + encodeURIComponent(pin);
+    }
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!TAMU && r.status === 401) {
+      let pinBaru = '';
+      try { pinBaru = window.prompt('Kantor admin sekarang butuh PIN dashboard:') || ''; } catch { /* abaikan */ }
+      if (pinBaru) {
+        try { sessionStorage.setItem('kantor.pin', pinBaru); } catch { /* abaikan */ }
+        return; // poll berikutnya memakai PIN baru
+      }
+      throw new Error('PIN diperlukan');
+    }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     if (!d || d.app !== 'kantor-agent') throw new Error('respons tidak dikenal');
@@ -2532,6 +2549,10 @@ let tamuJoy = { x: 0, y: 0 };
 let tamuDekat = false;
 let tamuSapaAt = 0;
 let tamuFPP = true;
+let tamuVel = 0;      // kecepatan teredam (akselerasi/deselerasi halus)
+let tamuTurnVel = 0;  // kecepatan belok teredam
+let tamuCamH = Math.PI / 2; // arah kamera teredam (mengikuti heading dgn jeda)
+let tamuBob = 0;      // fase ayunan langkah (head bob)
 const TOKO_IDX = TEAM_NAMES.indexOf('Toko');
 const TOKO_FRONT = TOKO_IDX >= 0 ? { x: DESK_DEFS[TOKO_IDX + 1].x, z: -2.5 } : null;
 const TAMU_BLOCKS = [
@@ -2569,33 +2590,43 @@ function tamuTerapkanMode() {
     tween = { t: 0, p0: camera.position.clone(), t0: controls.target.clone(), p1: HOME.pos.clone(), t1: HOME.target.clone() };
   }
 }
-function tamuKamera() {
+function tamuKamera(dt) {
   if (!tamuA) return;
   const p = tamuA.p.root.position;
-  const h = tamuA.heading;
-  camera.position.set(p.x, 1.58, p.z);
+  // arah pandang mengikuti heading dengan jeda halus (tidak patah-patah)
+  tamuCamH = turnTo(tamuCamH, tamuA.heading, dt * 9);
+  const h = tamuCamH;
+  // head bob: ayunan halus mengikuti langkah, besar sesuai kecepatan
+  const ratio = Math.min(1, Math.abs(tamuVel) / 2.1);
+  tamuBob += dt * 5.6 * ratio;
+  const bobY = Math.abs(Math.sin(tamuBob)) * 0.035 * ratio;
+  const sway = Math.sin(tamuBob) * 0.014 * ratio;
+  camera.position.set(p.x + Math.cos(h) * sway, 1.58 + bobY, p.z - Math.sin(h) * sway);
   camera.lookAt(p.x + Math.sin(h), 1.42, p.z + Math.cos(h));
+  camera.rotateZ(Math.sin(tamuBob) * 0.0075 * ratio); // miring sangat halus saat melangkah
 }
 function tamuTick(dt, t, now) {
   if (!tamuA) { spawnTamu(); if (!tamuA) return; }
   const a = tamuA;
   const root = a.p.root;
-  // belok: A/D atau sumbu-x joystick (kiri = heading naik = belok kiri)
-  const turnIn = (TAMU_KEYS.a ? 1 : 0) - (TAMU_KEYS.d ? 1 : 0) - tamuJoy.x;
-  if (turnIn) a.heading += THREE.MathUtils.clamp(turnIn, -1, 1) * 2.3 * dt;
-  // maju/mundur: W/S atau sumbu-y joystick (atas = maju)
-  const fwd = (TAMU_KEYS.w ? 1 : 0) - (TAMU_KEYS.s ? 1 : 0) - tamuJoy.y;
+  // belok: A/D atau sumbu-x joystick — kecepatan belok diredam agar tidak kaku
+  const turnIn = THREE.MathUtils.clamp((TAMU_KEYS.a ? 1 : 0) - (TAMU_KEYS.d ? 1 : 0) - tamuJoy.x, -1, 1);
+  tamuTurnVel = THREE.MathUtils.damp(tamuTurnVel, turnIn * 2.3, 10, dt);
+  if (Math.abs(tamuTurnVel) > 0.001) a.heading += tamuTurnVel * dt;
+  // maju/mundur: W/S atau sumbu-y joystick — akselerasi & deselerasi halus
+  const fwd = THREE.MathUtils.clamp((TAMU_KEYS.w ? 1 : 0) - (TAMU_KEYS.s ? 1 : 0) - tamuJoy.y, -1, 1);
+  tamuVel = THREE.MathUtils.damp(tamuVel, fwd * 2.1, 6.5, dt);
   let moving = false;
-  if (Math.abs(fwd) > 0.12) {
-    const sp = 2.1 * dt * THREE.MathUtils.clamp(fwd, -1, 1);
+  if (Math.abs(tamuVel) > 0.02) {
+    const sp = tamuVel * dt;
     const fx = Math.sin(a.heading);
     const fz = Math.cos(a.heading);
     const nx = THREE.MathUtils.clamp(root.position.x + fx * sp, ROOM.x0 + 0.45, ROOM.x1 - 0.45);
     const nz = THREE.MathUtils.clamp(root.position.z + fz * sp, ROOM.z0 + 0.45, ROOM.z1 - 0.45);
     if (!tamuBlocked(nx, root.position.z)) root.position.x = nx;
     if (!tamuBlocked(root.position.x, nz)) root.position.z = nz;
-    a.phase += dt * 8.5 * Math.sign(fwd);
-    moving = true;
+    a.phase += dt * 8.5 * (tamuVel / 2.1);
+    moving = Math.abs(tamuVel) > 0.3;
   }
   root.rotation.y = a.heading;
   applyPose(a.p, moving ? walkPose(a) : { hipsY: 0.9, lHipX: 0, rHipX: 0, lKneeX: 0, rKneeX: 0, headY: Math.sin(t * 0.7) * 0.08 }, dt);
@@ -2706,7 +2737,7 @@ function frame() {
   controls.target.z = THREE.MathUtils.clamp(controls.target.z, ROOM.z0 + 1, ROOM.z1 - 1);
   controls.target.y = THREE.MathUtils.clamp(controls.target.y, 0.3, 3.5);
   controls.update();
-  if (TAMU && tamuFPP) tamuKamera(); // FPP: kamera menempel di mata tamu
+  if (TAMU && tamuFPP) tamuKamera(dt); // FPP: kamera menempel di mata tamu
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
 }

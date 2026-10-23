@@ -40,6 +40,17 @@ async function sbPatch(table, params, body) {
   if (!res.ok) throw new Error(`Supabase PATCH ${table}: ${res.status}`);
   return true;
 }
+/** PATCH terverifikasi: pastikan tepat 1 baris berubah (untuk data kritis: payment_trx_id). */
+async function sbPatchVerified(table, params, body) {
+  const q = new URLSearchParams(params);
+  const res = await fetch(`${SB_URL}/rest/v1/${table}?${q}`, {
+    method: 'PATCH', headers: { ...sbHeaders(), Prefer: 'return=representation' }, body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Supabase PATCH ${table}: ${res.status}`);
+  const rows = await res.json().catch(() => []);
+  if (!rows.length) throw new Error(`PATCH ${table}: 0 baris berubah`);
+  return rows;
+}
 async function sbDelete(table, params) {
   const q = new URLSearchParams(params);
   const res = await fetch(`${SB_URL}/rest/v1/${table}?${q}`, {
@@ -257,13 +268,19 @@ async function createOrder(draft) {
     total_harga: total,
     status: 'pending',
   }]);
-  await sbPost('order_items', [{
-    order_id: orderId,
-    product_id: draft.product_id,
-    nama_produk: draft.product_nama,
-    qty: Number(draft.qty),
-    harga_satuan: Number(draft.harga),
-  }]);
+  try {
+    await sbPost('order_items', [{
+      order_id: orderId,
+      product_id: draft.product_id,
+      nama_produk: draft.product_nama,
+      qty: Number(draft.qty),
+      harga_satuan: Number(draft.harga),
+    }]);
+  } catch (e) {
+    // Kompensasi: hapus order agar tidak jadi order hantu tanpa rincian
+    await sbDelete('orders', { id: `eq.${orderId}` }).catch(() => {});
+    throw e;
+  }
 
   // PRODUK DIGITAL: kunci stok atas nama order ini (dikirim begitu bayar)
   if (digProduct) {
@@ -277,11 +294,17 @@ async function createOrder(draft) {
   // QRIS PayinAja
   let trxId = null;
   let qrUrl = null;
+  let trxTersimpan = false;
   const qris = await payinaja.createQRIS(total, orderId, draft.name, draft.phone);
   if (qris.ok) {
     trxId = qris.trx_id;
     qrUrl = qris.qr_image_url;
-    await sbPatch('orders', { id: `eq.${orderId}` }, { payment_trx_id: trxId }).catch(() => {});
+    // payment_trx_id WAJIB tersimpan terverifikasi — tanpanya panel tidak bisa
+    // mendeteksi pembayaran order ini. Gagal simpan = owner diberi tahu jelas.
+    for (let percobaan = 0; percobaan < 2 && !trxTersimpan; percobaan++) {
+      try { await sbPatchVerified('orders', { id: `eq.${orderId}` }, { payment_trx_id: trxId }); trxTersimpan = true; }
+      catch (e) { console.error(`[customer] simpan trx ${orderId} percobaan ${percobaan + 1} gagal:`, e.message); }
+    }
   }
 
   // FITUR ADMIN: notifikasi order baru ke owner via Telegram
@@ -289,7 +312,7 @@ async function createOrder(draft) {
     if (OWNER_ID) {
       await sendMessage(OWNER_ID,
         `🛍️ *ORDER BARU!*\n\n🧾 *${orderId}*\n👤 ${draft.name} (${draft.phone})\n📦 ${draft.product_nama} × ${draft.qty}\n💰 ${rp(total)}` +
-        (qris.ok ? '\n✅ QRIS dibuat' : `\n⚠️ QRIS gagal: ${qris.error || 'unknown'}`),
+        (qris.ok ? (trxTersimpan ? '\n✅ QRIS dibuat' : '\n🔴 QRIS dibuat tapi payment_trx_id GAGAL tersimpan — panel tidak bisa deteksi bayar order ini! Cek manual.') : `\n⚠️ QRIS gagal: ${qris.error || 'unknown'}`),
         { parse_mode: 'Markdown' }).catch(() => {});
     }
   } catch (e) { console.error('[customer] notif order baru gagal:', e.message); }
@@ -343,7 +366,7 @@ async function handleCustomer(userId, text, onPhoto) {
 
   // Perintah global: batal
   if (/^(batal|gak jadi|nggak jadi|cancel)$/i.test(q)) {
-    if (d.order_id && session.step === 'awaiting_payment') {
+    if (d.order_id && (session.step === 'awaiting_payment' || session.step === 'qris_failed')) {
       await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'batal' }).catch(() => {});
       await digital.releaseLock(d.order_id).catch(() => {});
     }
@@ -387,13 +410,25 @@ async function handleCustomer(userId, text, onPhoto) {
   // Step: QRIS gagal dibuat sebelumnya → bisa coba lagi
   if (session.step === 'qris_failed') {
     if (/dari awal|mulai lagi|ulang/i.test(q)) {
+      // Order lama dibatalkan + kunci stok digital dilepas agar tidak bocor
+      if (d.order_id) {
+        await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'batal' }).catch(() => {});
+        await digital.releaseLock(d.order_id).catch(() => {});
+      }
       await clearSession(userId);
       return 'Baik kak, kita mulai dari awal ya. Mau pesan produk apa? 😊';
     }
     if (/coba lagi|buat qris|ulangi|retry/i.test(q)) {
       const qris = await payinaja.createQRIS(d.amount, d.order_id, d.name, d.phone);
       if (qris.ok && qris.qr_image_url) {
-        await sbPatch('orders', { id: `eq.${d.order_id}` }, { payment_trx_id: qris.trx_id }).catch(() => {});
+        let trxOk = false;
+        for (let percobaan = 0; percobaan < 2 && !trxOk; percobaan++) {
+          try { await sbPatchVerified('orders', { id: `eq.${d.order_id}` }, { payment_trx_id: qris.trx_id }); trxOk = true; }
+          catch (e) { console.error('[customer] simpan trx retry gagal:', e.message); }
+        }
+        if (!trxOk && OWNER_ID) {
+          await sendMessage(OWNER_ID, `🔴 *${d.order_id}*: QRIS dibuat ulang tapi payment_trx_id GAGAL tersimpan — panel tidak bisa deteksi bayar order ini!`).catch(() => {});
+        }
         await saveSession(userId, 'awaiting_payment', { ...d, trx_id: qris.trx_id });
         const caption = `🧾 *Pesanan ${d.order_id}*\n${d.product_nama} × ${d.qty}\n*Total: ${rp(d.amount)}*\n\nSilakan scan QRIS di atas untuk membayar. Setelah bayar, ketik *SUDAH BAYAR*.`;
         if (onPhoto) { await onPhoto(qris.qr_image_url, caption); return null; }
@@ -549,7 +584,7 @@ async function handleCustomer(userId, text, onPhoto) {
   if (p.qty !== null && p.qty !== undefined && String(p.qty).trim() !== '') {
     const m = String(p.qty).match(/\d+/);
     const n = m ? parseInt(m[0], 10) : 0;
-    if (n > 0) d.qty = n;
+    if (n > 0) d.qty = Math.min(n, 100); // batas atas waras — cegah QRIS nominal absurd
   }
   if (p.name) d.name = String(p.name).slice(0, 80);
   if (p.phone) d.phone = normPhone(p.phone); // Bug #6: 08xx → 628xx
@@ -586,13 +621,14 @@ async function handleCustomer(userId, text, onPhoto) {
     return 'Kakak belum punya pesanan aktif. Mau buat pesanan dulu?';
   }
 
-  // Tentukan kelengkapan
+  // Tentukan kelengkapan (produk digital tidak butuh alamat — terkirim via WA)
+  const prodSel = d.product_id ? products.find((x) => x.id === d.product_id) : null;
   const missing = [];
   if (!d.product_id) missing.push('produk');
   if (!d.qty) missing.push('jumlah');
   if (!d.name) missing.push('nama');
   if (!d.phone) missing.push('no WA');
-  if (!d.address) missing.push('alamat');
+  if (!d.address && !(prodSel && prodSel.tipe === 'digital')) missing.push('alamat');
 
   if (!missing.length) {
     await saveSession(userId, 'confirm', d);
@@ -649,22 +685,31 @@ async function handleCustomerPhoto(userId, fileId) {
   }
   await logActivitySafe('bukti', `Bukti transfer ${d.order_id}: terbaca ${rp(read)} ${cocok ? '(cocok)' : '(beda)'}`);
   if (cocok) {
-    // OTOMATIS: konfirmasi pembayaran → kirim invoice ke customer + notif ke admin WA
-    let digMsg = null;
+    // OTOMATIS: konfirmasi pembayaran → kirim invoice ke customer + notif ke admin WA.
+    // KEAMANAN (audit Gelombang 2): kecocokan OCR saja TIDAK cukup untuk melepas
+    // PRODUK DIGITAL — screenshot transfer bisa dipalsukan/dipakai ulang. Konten
+    // digital DITAHAN sampai admin memverifikasi bukti ini lalu melepasnya dengan
+    // perintah "kirim digital INV-xxxxxx". Order fisik berjalan seperti biasa.
+    let digHeld = false;
+    let patchOk = false;
+    let invOk = false;
     try {
       const SB_URL2 = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
       const SB_KEY2 = process.env.SUPABASE_SERVICE_KEY || '';
       const H = { apikey: SB_KEY2, 'Content-Type': 'application/json', Prefer: 'return=minimal' };
-      // 1. Update status order → diproses
-      await fetch(`${SB_URL2}/rest/v1/orders?id=eq.${d.order_id}`, {
+      const lockedFoto = await digital.getLockedItems(d.order_id).catch(() => []);
+      digHeld = Array.isArray(lockedFoto) && lockedFoto.length > 0;
+      // 1. Update status order → diproses (hasil tulis diperiksa)
+      const patchRes = await fetch(`${SB_URL2}/rest/v1/orders?id=eq.${d.order_id}`, {
         method: 'PATCH', headers: H,
         body: JSON.stringify({ status: 'diproses' }),
-      }).catch(() => {});
-      // 1b. PRODUK DIGITAL: kirim konten langsung, status selesai
-      const terkirimFoto = await digital.deliverLocked(d.order_id, d.phone).catch(() => null);
-      if (terkirimFoto) {
-        await sbPatch('orders', { id: `eq.${d.order_id}` }, { status: 'selesai' }).catch(() => {});
-        digMsg = terkirimFoto.map((t) => t.message).join('\n\n———\n\n');
+      }).catch(() => null);
+      patchOk = !!(patchRes && patchRes.ok);
+      if (digHeld && OWNER_ID) {
+        const { sendMessage } = require('./telegram-api');
+        await sendMessage(OWNER_ID,
+          `🔐 *PRODUK DIGITAL DITAHAN (verifikasi manual)*\n\nPesanan: ${d.order_id}\nPelanggan: ${d.name} (${d.phone})\nBukti transfer terbaca COCOK: ${rp(read)}.\n\nKonten digital BELUM dikirim. Cek bukti transfer yang diteruskan di atas — bila asli, lepas dengan perintah:\n\`kirim digital ${d.order_id}\``,
+          { parse_mode: 'Markdown' }).catch(() => {});
       }
       // 2. Generate & upload invoice
       const { generateInvoice } = require('./invoice');
@@ -685,10 +730,11 @@ async function handleCustomerPhoto(userId, fileId) {
           const custWa = String(d.phone || '').replace(/\D/g, '');
           // 3. Antrekan invoice ke WA customer
           if (custWa.length >= 10) {
-            await fetch(`${SB_URL2}/rest/v1/wa_outbox`, {
+            const outR = await fetch(`${SB_URL2}/rest/v1/wa_outbox`, {
               method: 'POST', headers: H,
               body: JSON.stringify([{ to_wa: custWa, kind: 'document', content: publicUrl, caption: `Invoice-${d.order_id}.pdf`, status: 'pending' }]),
-            }).catch(() => {});
+            }).catch(() => null);
+            invOk = !!(outR && outR.ok);
           }
           // 4. Notifikasi ke admin WA (hanya jika ADMIN_WA diisi di env)
           const adminWa = (process.env.ADMIN_WA || '').replace(/\D/g, '');
@@ -703,11 +749,12 @@ async function handleCustomerPhoto(userId, fileId) {
       }
       // 5. Bersihkan sesi
       await clearSession(userId).catch(() => {});
-      await logActivitySafe('bayar_otomatis', `Order ${d.order_id} auto-konfirmasi, invoice terkirim.`);
+      await logActivitySafe('bayar_otomatis', `Order ${d.order_id} auto-konfirmasi OCR. Patch ${patchOk ? 'OK' : 'GAGAL'}, invoice ${invOk ? 'OK' : 'GAGAL'}, digital ${digHeld ? 'DITAHAN utk verifikasi admin' : '-'}.`);
     } catch (e) { console.error('[auto-bayar]', e.message); }
-    return digMsg
-      ? `Pembayaran terkonfirmasi otomatis kak! ✅ (${rp(read)})\n\nIni pesanan digital kakak 👇\n\n${digMsg}\n\nSimpan baik-baik ya kak 🙏`
-      : `Pembayaran terkonfirmasi otomatis kak! ✅ (${rp(read)})\nInvoice sudah dikirim ke WA kakak. Pesanan segera diproses ya 🙏`;
+    if (digHeld) {
+      return `Pembayaran terbaca cocok kak! ✅ (${rp(read)})\n\nKarena ini produk digital, kontennya akan dikirim setelah admin memverifikasi bukti transfer kakak — mohon tunggu sebentar ya kak 🙏${invOk ? '\nInvoice sudah dikirim ke WA kakak.' : ''}`;
+    }
+    return `Pembayaran terkonfirmasi otomatis kak! ✅ (${rp(read)})${invOk ? '\nInvoice sudah dikirim ke WA kakak.' : ''} Pesanan segera diproses ya 🙏`;
   }
   return `Bukti diterima kak, tapi nominal yang terbaca (${read ? rp(read) : 'tidak jelas'}) berbeda dengan total ${rp(total)}. Admin akan cek manual ya kak 🙏`;
 }

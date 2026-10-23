@@ -19,9 +19,14 @@ Tabel dan kolom yang tersedia:
 - customers(id, nama, nomor_wa, provinsi, kota_kabupaten, kecamatan, desa_kelurahan, patokan, kode_pos, alamat_lengkap)
 - order_summary(id, tanggal, nama_penerima, nomor_wa, nomor_resi, status, total_harga, jumlah_item, ringkasan_produk)
 - order_items(order_id, product_id, nama_produk, qty, harga_satuan) — isi barang per order; filter order_id "eq.INV-xxxxxx"
+- stok_digital(id, produk_id, status) — stok produk digital; status ∈ tersedia, dikunci, terjual.
+  STOK DIGITAL yang bisa dijual = JUMLAH BARIS status "tersedia" untuk produk_id itu (BUKAN kolom stok di products).
+  Untuk pertanyaan sisa stok digital: query tabel ini dengan filter {"produk_id": "eq.KODE", "status": "eq.tersedia"} dan limit 500.
+- pengeluaran(id, keterangan, nominal, tanggal) — biaya operasional toko.
 
 Tugas: baca pertanyaan user (Bahasa Indonesia), keluarkan SATU objek JSON saja:
-{"queries": [{"table": "orders|products|customers|order_summary", "select": "kolom1,kolom2", "filter": {"kolom": "eq.nilai"}, "order": "kolom.desc", "limit": 20}]}
+{"queries": [{"table": "orders|products|customers|order_summary|order_items|stok_digital|pengeluaran", "select": "kolom1,kolom2", "filter": {"kolom": "eq.nilai"}, "order": "kolom.desc", "limit": 20}]}
+Aturan AGREGAT (omset, jumlah order, total pengeluaran): pakai limit 500 agar semua baris ikut terhitung.
 Aturan filter: "eq.nilai" sama dengan, "ilike.*teks*" mengandung teks, "gte.2026-10-01" tanggal >= , "lte.2026-10-18" tanggal <= .
 Untuk pencarian nomor WA/Hape: jika user memberi nomor lengkap (10+ digit) pakai "ilike.*nomor*"; jika hanya akhiran (mis. "3053", 4 digit) juga pakai "ilike.*3053*" pada kolom nomor_wa.
 Untuk pertanyaan tanggal relatif ("minggu ini", "hari ini"), hitung dari hari ini dan pakai gte/lte.
@@ -39,12 +44,16 @@ Jika hasil query ada yang error 'gagal mengambil data', katakan database sedang 
 Jika data kosong (count 0), katakan terus terang ("belum ada data") dan tawarkan alternatif terdekat.
 Jangan mengarang data yang tidak ada di hasil query.
 
+ATURAN KERAS: Kamu HANYA bisa MEMBACA data. Kamu TIDAK BISA mengubah status, menghapus, mengirim pesan, atau menyimpan apa pun. JANGAN PERNAH mengklaim sudah melakukan aksi tulis ("sudah diubah", "sudah dihapus", "sudah dikirim") — klaim seperti itu bohong. Bila user meminta aksi tulis, katakan aksi itu dilakukan lewat perintah admin/dashboard, bukan dari jawaban ini.
+
 PENGETAHUAN PRODUK (toko nota NCR ini):
 - Ukuran yang dijual: 1/2, 1/3, 1/4, 1/6, 1/8, 1/10 folio.
-- Tiap ukuran ada 50 lembar (Rp 22.830) dan 100 lembar (Rp 45.650); semua bisa 1ply/2ply/3ply.
+- Tiap ukuran tersedia 50 lembar dan 100 lembar; semua bisa 1ply/2ply/3ply.
+  HARGA tiap varian BERBEDA — selalu sebutkan harga dari hasil query, JANGAN memakai contoh angka dari ingatan.
 - Ukuran yang paling biasa dipesan pelanggan: 1/2 folio dan 1/3 folio.
 - Saat user minta rekomendasi ukuran, sarankan 1/2 atau 1/3 folio dengan harga dari hasil query,
   dan pastikan stoknya > 0 — jangan tawarkan produk yang stoknya habis.
+  Khusus produk digital: stok yang berlaku adalah hitungan stok_digital tersedia (lihat aturan di prompt perencana), bukan kolom stok products.
 - Harga pasti mengikuti hasil query products, bukan ingatan.`;
 
 function parsePlan(raw) {
@@ -132,6 +141,17 @@ async function answer(question) {
   if (!SB_URL || !SB_KEY || SB_KEY.includes('___ISI')) {
     throw new Error('SUPABASE_SERVICE_KEY belum diisi — skill toko butuh service_role key.');
   }
+  // REM KLAIM TULIS: skill toko HANYA bisa membaca. Permintaan AKSI TULIS (ubah status,
+  // hapus, jadikan, kirim ke WA, dsb) TIDAK BOLEH dijawab LLM yang mengaku sudah
+  // melakukannya — arahkan ke jalur deterministik yang benar-benar mengeksekusi.
+  const qLow = String(question).toLowerCase();
+  const niatTulis = /(rubah|ubah|ganti|jadikan|tandai|set)\s+(status|pesanan|order)|hapus\s+(order|pesanan|produk)|kirim(kan)?\s+.*(ke\s+wa|invoice|pdf|resi)|simpan\s+(catatan|data)|catat(kan)?\s+pengeluaran/.test(qLow);
+  if (niatTulis) {
+    return {
+      usedDb: false,
+      answer: 'Itu aksi mengubah data — saya di jalur baca saja, tidak bisa (dan tidak akan mengaku bisa) mengubah database dari sini.\n\nLakukan lewat jalur yang benar-benar mengeksekusi:\n• Ubah status 1 order: ketik `rubah status INV-xxxxxx menjadi selesai`\n• Banyak order: ketik `status massal`\n• Hapus order: `/hapus INV-xxxxxx`\n• Kirim invoice ke WA: `kirim invoice INV-xxxxxx ke WA`\n• Atau lewat dashboard /dash/ → Kelola Order.',
+    };
+  }
   // JALUR DETERMINISTIK: pertanyaan yang menyebut nomor invoice dijawab
   // langsung dari database TANPA LLM (cegah "belum ada data" palsu & karangan isi pesanan).
   const invMatch = String(question).match(/INV-\d{6}/i);
@@ -144,9 +164,12 @@ async function answer(question) {
       return { answer: `Maaf, database sedang tidak bisa diakses untuk cek ${invId}. Coba lagi nanti ya.`, usedDb: true };
     }
   }
+  // Tanggal acuan WIB diinjeksikan agar filter "hari ini/minggu ini/bulan ini"
+  // dihitung dari tanggal yang BENAR, bukan asumsi model.
+  const todayWIB = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
   const planRaw = await chat(
     [
-      { role: 'system', content: ROUTER_PROMPT },
+      { role: 'system', content: ROUTER_PROMPT + `\n\nHari ini: ${todayWIB} (WIB). Hitung semua tanggal relatif dari tanggal ini.` },
       { role: 'user', content: String(question) },
     ],
     { maxTokens: 500, temperature: 0.2 }

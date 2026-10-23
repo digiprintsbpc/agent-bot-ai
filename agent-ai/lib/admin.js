@@ -59,7 +59,18 @@ async function sbPatch(table, params, body) {
 }
 async function sbDel(table, params) {
   const q = new URLSearchParams(params);
-  await fetch(`${SB_URL}/rest/v1/${table}?${q}`, { method: 'DELETE', headers: sbHeaders() }).catch(() => {});
+  const res = await fetch(`${SB_URL}/rest/v1/${table}?${q}`, { method: 'DELETE', headers: sbHeaders() });
+  if (!res.ok) throw new Error(`SB DELETE ${table} ${res.status}`);
+  return true;
+}
+/** PATCH yang mengembalikan baris hasil — untuk MEMVERIFIKASI tulisan benar-benar terjadi. */
+async function sbPatchRows(table, params, body) {
+  const q = new URLSearchParams(params);
+  const res = await fetch(`${SB_URL}/rest/v1/${table}?${q}`, {
+    method: 'PATCH', headers: { ...sbHeaders(), Prefer: 'return=representation' }, body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`SB PATCH ${table} ${res.status}`);
+  return res.json();
 }
 
 // ---------- State admin ----------
@@ -75,7 +86,7 @@ async function setAdminState(userId, step, data = {}) {
     'resolution=merge-duplicates,return=minimal').catch(() => {});
 }
 async function clearAdminState(userId) {
-  await sbDel('admin_states', { user_id: `eq.${userId}` });
+  await sbDel('admin_states', { user_id: `eq.${userId}` }).catch((e) => console.error('[state] clear gagal:', e.message));
 }
 
 // ---------- Helpers (sama seperti bot lama) ----------
@@ -483,14 +494,18 @@ async function handleCallback(chatId, msgId, data, queryId) {
   if (data.startsWith('setstatus_')) {
     const parts = data.split('_');
     const idPesanan = parts[1]; const statusBaru = parts[2]; const wa = parts[3];
-    await updateStatus(idPesanan, statusBaru);
+    try {
+      await updateStatus(idPesanan, statusBaru);
+    } catch (e) {
+      return edit(`❌ Gagal mengubah status ${idPesanan}: ${e.message}`);
+    }
     let txt = `📦 *UPDATE PESANAN (${idPesanan})*\nHalo kak! Pesanan kakak saat ini `;
     if (statusBaru === 'Dikirim') txt += 'sedang *DIKIRIM* 🚚';
     else if (statusBaru === 'Diproses') txt += 'sedang *DIPROSES* ⚙️';
     else txt += 'sudah *SELESAI* 🥰';
-    await queueWA(wa, 'text', txt);
-    await logActivity('status', `Status ${idPesanan} → ${statusBaru} oleh admin.`);
-    return edit(`✅ Status diubah menjadi ${statusBaru}`);
+    const waOk = await queueWA(wa, 'text', txt);
+    await logActivity('status', `Status ${idPesanan} → ${statusBaru} oleh admin. Notif WA ${waOk ? 'terkirim' : 'GAGAL antre'}.`);
+    return edit(`✅ Status diubah menjadi ${statusBaru}${waOk ? '' : '\n⚠️ Tapi notif WA ke customer GAGAL masuk antrean.'}`);
   }
 
   // ===== FITUR ADMIN: Dashboard omset (via perintah /dashboard) =====
@@ -651,6 +666,77 @@ async function handleMessage(chatId, msg) {
       }
     }
 
+    // ===== UBAH STATUS ORDER bahasa bebas — deterministik & TERVERIFIKASI =====
+    // "rubah status pesanan menjadi selesai" / "jadikan INV-123456 dikirim" dieksekusi
+    // kode beneran di sini — TIDAK jatuh ke AI yang hanya bisa mengaku.
+    const targetStatusMatch = text.match(/\b(selesai|dikirim|diproses|dibatalkan|batal|pending)\b/i);
+    const mintaUbahStatus = targetStatusMatch && (
+      /(rubah|ubah|ganti|jadikan|tandai|set)\b[^.]{0,30}\bstatus\b/i.test(text)
+      || (/status/i.test(text) && /(rubah|ubah|ganti|jadikan|tandai|menjadi)/i.test(text))
+    );
+    if (mintaUbahStatus) {
+      const target = targetStatusMatch[1].toLowerCase() === 'dibatalkan' ? 'batal' : targetStatusMatch[1].toLowerCase();
+      const invMatch = text.match(/INV-\d{6}/i)
+        || (msg.reply_to_message?.text || '').match(/INV-\d{6}/i)
+        || (msg.reply_to_message?.caption || '').match(/INV-\d{6}/i);
+      if (!invMatch) {
+        await tg.sendMessage(chatId, `Siap — ubah status jadi *${target}* untuk order yang mana? Kirim ID-nya, contoh: \`rubah status INV-123456 menjadi ${target}\` — atau balas (quote) pesan invoice-nya lalu ketik perintahnya.`, MD);
+        return true;
+      }
+      const oid = invMatch[0].toUpperCase();
+      try {
+        const rows = await sbGet('orders', { select: 'id,status,nama_penerima,total_harga', id: `eq.${oid}` });
+        if (!rows.length) {
+          await tg.sendMessage(chatId, `❌ Order *${oid}* tidak ditemukan di database.`, MD);
+          return true;
+        }
+        const before = rows[0].status;
+        const upd = await sbPatchRows('orders', { id: `eq.${oid}` }, { status: target });
+        if (!upd.length || upd[0].status !== target) throw new Error('verifikasi tulis gagal');
+        await logActivity('status', `Status ${oid} ${before} → ${target} via perintah teks admin.`);
+        await tg.sendMessage(chatId, `✅ *Status berubah di database*\n${oid} — ${rows[0].nama_penerima} (${rp(Number(rows[0].total_harga || 0))})\nStatus: ${before} → *${target}*`, MD);
+      } catch (e) {
+        await tg.sendMessage(chatId, `❌ Gagal mengubah status *${oid}*: ${e.message}. Status di database TIDAK berubah.`, MD);
+      }
+      return true;
+    }
+
+    // ===== KIRIM DIGITAL: lepas konten digital yang ditahan verifikasi manual =====
+    // Pasangan jalur foto-OCR: konten digital tidak dilepas OCR sendirian; admin
+    // memverifikasi bukti transfer lalu melepasnya dengan perintah ini.
+    const kirimDigMatch = text.match(/^kirim\s+digital\s+(INV-\d{6})/i);
+    if (kirimDigMatch) {
+      const oid = kirimDigMatch[1].toUpperCase();
+      try {
+        const rows = await sbGet('orders', { select: 'id,status,nama_penerima,nomor_wa', id: `eq.${oid}` });
+        if (!rows.length) {
+          await tg.sendMessage(chatId, `❌ Order *${oid}* tidak ditemukan di database.`, MD);
+          return true;
+        }
+        const o = rows[0];
+        const terkirim = await digital.deliverLocked(oid, o.nomor_wa).catch(() => null);
+        if (!terkirim || !terkirim.length) {
+          await tg.sendMessage(chatId, `❌ Tidak ada konten terkunci untuk *${oid}* — mungkin sudah terkirim sebelumnya atau stoknya kosong.`, MD);
+          return true;
+        }
+        let selesaiOk = true;
+        try { await sbPatch('orders', { id: `eq.${oid}` }, { status: 'selesai' }); }
+        catch (e) { selesaiOk = false; console.error('[kirim-digital] patch selesai gagal:', e.message); }
+        let waOk = true;
+        for (const t of terkirim) {
+          const okQ = await queueWA(o.nomor_wa, 'text', `✅ *PESANAN SELESAI (${oid})*\n\nBerikut pesanan digital kakak:\n\n${t.message}`);
+          if (!okQ) waOk = false;
+        }
+        await logActivity('kirim_digital', `${oid} konten digital dilepas manual oleh admin. WA ${waOk ? 'OK' : 'GAGAL'}, status ${selesaiOk ? 'selesai' : 'GAGAL diubah'}.`);
+        await tg.sendMessage(chatId, waOk && selesaiOk
+          ? `✅ Konten digital *${oid}* terkirim ke WA ${o.nama_penerima} & status order selesai.`
+          : `⚠️ *${oid}* diproses sebagian — antre WA: ${waOk ? 'OK' : '❌ GAGAL'}, ubah status: ${selesaiOk ? 'OK' : '❌ GAGAL'}. Cek manual ya.`, MD);
+      } catch (e) {
+        await tg.sendMessage(chatId, `❌ Gagal melepas konten *${oid}*: ${e.message}`, MD);
+      }
+      return true;
+    }
+
     // ===== PERCAKAPAN: edit/hapus/status massal =====
     if (/^(edit|hapus|status|ubah)\s+massal$/i.test(text.trim())) {
       const aksi = text.trim().toLowerCase().split(' ')[0];
@@ -706,8 +792,8 @@ async function handleMessage(chatId, msg) {
       let ok = 0;
       for (const id of ids) {
         try {
-          await sbPatch('orders', `id=eq.${id}`, { status: newStatus });
-          ok++;
+          const upd = await sbPatchRows('orders', `id=eq.${id}`, { status: newStatus });
+          if (upd.length) ok++;
         } catch (e) {}
       }
       await tg.sendMessage(chatId, `✅ ${ok}/${ids.length} order → *${newStatus}*.`, MD);
@@ -1048,7 +1134,7 @@ async function handleMessage(chatId, msg) {
     const ids = d.ids || [];
     let ok = 0;
     for (const id of ids) {
-      try { await sbPatch('orders', `id=eq.${id}`, { status: newStatus }); ok++; } catch (e) {}
+      try { const upd = await sbPatchRows('orders', `id=eq.${id}`, { status: newStatus }); if (upd.length) ok++; } catch (e) {}
     }
     await clearAdminState(chatId);
     await tg.sendMessage(chatId, `✅ ${ok}/${ids.length} order → *${newStatus}*.`, MD);
@@ -1351,12 +1437,14 @@ async function handleMessage(chatId, msg) {
     let teks = '';
     if (jenis === 'kwi') teks = `📝 *Template Kwitansi*\nNomor pesanan: \nNama Usaha: ${profile.nama}\nAlamat: ${profile.alamat}\nKontak: ${profile.kontak}\nCatatan:\n\n_(Logo Tersedia di Sistem)_`;
     if (jenis === 'not') teks = `📝 *Template Nota*\nNama Usaha: ${profile.nama}\nJenis Usaha:\nAlamat: ${profile.alamat}\nKontak: ${profile.kontak}\nPilihan Model: Landscape / Portrait\nCatatan:`;
+    let kirimOk = true;
     if (teks) {
-      if (profile.logo) await queueWA(wa, 'image', profile.logo, teks);
-      else await queueWA(wa, 'text', teks);
+      kirimOk = profile.logo ? await queueWA(wa, 'image', profile.logo, teks) : await queueWA(wa, 'text', teks);
     }
     await clearAdminState(chatId);
-    await tg.sendMessage(chatId, `✅ Form berhasil dikirim ke WA pelanggan (${wa}) dengan kop/profil Usaha Anda!`);
+    await tg.sendMessage(chatId, kirimOk
+      ? `✅ Form berhasil masuk antrean WA pelanggan (${wa}) dengan kop/profil Usaha Anda!`
+      : `❌ GAGAL memasukkan form ke antrean WA (${wa}). Cek koneksi database lalu coba lagi.`);
     return true;
   }
 
@@ -1373,10 +1461,11 @@ async function handleMessage(chatId, msg) {
       let displayHarga = prod.hrg;
       if (!isNaN(prod.hrg) && String(prod.hrg).trim() !== '') displayHarga = 'Rp ' + parseInt(prod.hrg, 10).toLocaleString('id-ID');
       const teksProduk = `✨ *DETAIL PRODUK KAMI*\n\n📦 *ID:* ${prod.id}\n🏷️ *Nama:* ${prod.nama}\n📂 *Kategori:* ${prod.kat}\n\n📜 *Deskripsi:*\n${prod.desc}\n\n💰 *Harga:* ${displayHarga}\n📊 *Sisa Stok:* ${prod.stok}\n\n_Berminat? Silakan balas pesan ini ya kak!_`;
-      if (prod.link) await queueWA(wa, 'image', prod.link, teksProduk);
-      else await queueWA(wa, 'text', teksProduk);
+      const prodOk = prod.link ? await queueWA(wa, 'image', prod.link, teksProduk) : await queueWA(wa, 'text', teksProduk);
       await tg.editMessageText(chatId, wait.message_id,
-        `✅ *BERHASIL!*\nDetail produk *${prod.nama}* telah dikirim ke WA pelanggan: ${wa}`,
+        prodOk
+          ? `✅ *BERHASIL!*\nDetail produk *${prod.nama}* masuk antrean WA pelanggan: ${wa}`
+          : `❌ *GAGAL* memasukkan detail produk ke antrean WA (${wa}). Cek koneksi database lalu coba lagi.`,
         { ...MD, ...kb([[{ text: '🔙 Kembali ke Menu', callback_data: 'home' }]]) });
     } catch (e) { await tg.editMessageText(chatId, wait.message_id, `❌ *Terjadi Kesalahan:* ${e.message}`, MD); }
     await clearAdminState(chatId);
@@ -1509,7 +1598,8 @@ async function handleInvoiceToWA(chatId, orderId) {
     }
     const publicUrl = `${SB_URL}/storage/v1/object/public/invoices/${fileName}`;
 
-    await queueWA(toWa, 'document', publicUrl, `Invoice-${orderId}.pdf`);
+    const antreOk = await queueWA(toWa, 'document', publicUrl, `Invoice-${orderId}.pdf`);
+    if (!antreOk) throw new Error('Gagal memasukkan invoice ke antrean WA (database).');
     await logActivity('invoice_wa', `Invoice ${orderId} dikirim ke WA ${toWa}.`);
     await tg.editMessageText(chatId, waitMsg.message_id,
       `✅ *Invoice ${orderId} masuk antrean WA*\nTujuan: ${order.nama_penerima} (${toWa})\nPanel akan mengirim PDF-nya via WhatsApp.`, MD);
@@ -1538,18 +1628,18 @@ async function handleBroadcastExec(chatId, pesan) {
   try {
     const rows = await sbGet('customers', { select: 'nomor_wa,nama', limit: 1000 });
     const seen = new Set();
-    let count = 0;
+    let count = 0; let gagal = 0;
     for (const r of rows) {
       const wa = String(r.nomor_wa || '').replace(/\D/g, '');
       if (wa.length < 10 || seen.has(wa)) continue;
       seen.add(wa);
-      await queueWA(wa, 'text', pesan);
-      count++;
+      const okQ = await queueWA(wa, 'text', pesan);
+      if (okQ) count++; else gagal++;
       // Rate limit: jeda sudah ditangani di poller panel (2 detik antar kirim)
     }
     await tg.editMessageText(chatId, waitMsg.message_id,
-      `✅ *Broadcast masuk antrean!*\n${count} pesan akan dikirim via WA (jeda 2 detik per pesan).`, MD);
-    await logActivity('broadcast', `Broadcast ke ${count} customer: ${pesan.slice(0, 100)}`);
+      `✅ *Broadcast masuk antrean!*\n${count} pesan akan dikirim via WA (jeda 2 detik per pesan).${gagal ? `\n⚠️ ${gagal} nomor GAGAL masuk antrean.` : ''}`, MD);
+    await logActivity('broadcast', `Broadcast ke ${count} customer (${gagal} gagal antre): ${pesan.slice(0, 100)}`);
   } catch (e) {
     await tg.editMessageText(chatId, waitMsg.message_id, `❌ *Gagal:* ${e.message}`, MD).catch(() => {});
   }
@@ -1623,14 +1713,17 @@ async function handleFotoOtomatis(chatId, msg, captionText) {
     return;
   }
 
-  // Update order: status dikirim + nomor resi (bila terbaca)
+  // Update order: status dikirim + nomor resi (bila terbaca) — hasil tulis DIVERIFIKASI
   const patchData = { status: 'dikirim' };
   if (info.resi) patchData.nomor_resi = info.resi;
-  await sbPatch('orders', { id: `eq.${order.id}` }, patchData).catch((e) => console.error('[ocr-resi] patch gagal:', e.message));
+  let patchOk = true;
+  try { await sbPatch('orders', { id: `eq.${order.id}` }, patchData); }
+  catch (e) { patchOk = false; console.error('[ocr-resi] patch gagal:', e.message); }
 
   // Antrekan foto resi + notifikasi ke WA customer
   const hari = getEstimasi(order.alamat_lengkap);
   const pesanWA = `📦 *PESANAN DIKIRIM (${order.id})*\n\nHalo kak ${order.nama_penerima}! Paket sudah diserahkan ke kurir. 🚚\n${info.resi ? `*No. Resi:* ${info.resi}${info.resiKurir ? ` (${info.resiKurir})` : ''}\n` : ''}(Otomatis selesai dalam ${hari} hari)`;
+  let waOk = false;
   if (order.nomor_wa) {
     // Upload foto ke Storage dulu (URL Telegram kedaluwarsa cepat)
     let imgPublicUrl = fileUrl;
@@ -1647,12 +1740,14 @@ async function handleFotoOtomatis(chatId, msg, captionText) {
         if (upImg.ok) imgPublicUrl = `${SB_URL}/storage/v1/object/public/invoices/${imgName}`;
       }
     } catch (e) { console.error('[ocr-resi] upload img gagal:', e.message); }
-    await queueWA(order.nomor_wa, 'image', imgPublicUrl, pesanWA, imgPublicUrl);
+    waOk = await queueWA(order.nomor_wa, 'image', imgPublicUrl, pesanWA, imgPublicUrl);
   }
-  await logActivity('resi', `Resi ${order.id} terkirim via OCR otomatis. Resi: ${info.resi || '-'}. Estimasi ${hari} hari.`);
+  await logActivity('resi', `Resi ${order.id} via OCR otomatis. Resi: ${info.resi || '-'}. Estimasi ${hari} hari. Patch ${patchOk ? 'OK' : 'GAGAL'}, WA ${waOk ? 'OK' : 'GAGAL'}.`);
 
   await tg.sendMessage(chatId,
-    `✅ *Resi terkirim ke ${order.nama_penerima} via WA.*\nStatus → Dikirim 🚚\n${info.resi ? `No. Resi: ${info.resi}` : ''}`,
+    patchOk && waOk
+      ? `✅ *Resi terkirim ke ${order.nama_penerima} via WA.*\nStatus → Dikirim 🚚\n${info.resi ? `No. Resi: ${info.resi}` : ''}`
+      : `⚠️ *Resi ${order.id} diproses sebagian:*\n• Update status di database: ${patchOk ? 'OK' : '❌ GAGAL'}\n• Notif WA ke customer: ${waOk ? 'OK' : '❌ GAGAL'}\nCek manual ya — jangan kirim ulang sebelum memastikan.`,
     { ...MD, reply_to_message_id: msg.message_id });
 }
 
@@ -1761,15 +1856,28 @@ async function handleTemplateOrder(chatId, text) {
         id: idPesanan, customer_id: customerId, nama_penerima: namaPenerima, nomor_wa: nowa, alamat_lengkap: alamatPenerima,
         total_harga: totalKeseluruhan, status: 'diproses',
       }], 'return=minimal');
+      // Rincian item WAJIB tersimpan lengkap — gagal = order dibatalkan & dilaporkan (tidak diam-diam)
+      let itemsOk = true;
       for (let i = 0; i < prod.length; i++) {
         const q = parseInt(qty[i][1], 10) || 0; const h = parseInt(String(hrg[i][1]).replace(/[^0-9]/g, ''), 10) || 0;
         const diIt = digItems ? digItems[i] : null;
-        await sbPost('order_items', [{ order_id: idPesanan, product_id: diIt ? diIt.product.id : undefined, nama_produk: diIt ? diIt.product.nama : prod[i][1].trim(), qty: diIt ? diIt.qty : q, harga_satuan: diIt ? Number(diIt.product.harga || 0) : h }], 'return=minimal').catch(() => {});
+        try {
+          await sbPost('order_items', [{ order_id: idPesanan, product_id: diIt ? diIt.product.id : undefined, nama_produk: diIt ? diIt.product.nama : prod[i][1].trim(), qty: diIt ? diIt.qty : q, harga_satuan: diIt ? Number(diIt.product.harga || 0) : h }], 'return=minimal');
+        } catch (e) { itemsOk = false; console.error('[order] item gagal:', e.message); }
       }
-      if (ongkirAktif) {
-        await sbPost('order_items', [{ order_id: idPesanan, nama_produk: 'Ongkir', qty: 1, harga_satuan: ongkirAktif }], 'return=minimal').catch(() => {});
+      if (itemsOk && ongkirAktif) {
+        try {
+          await sbPost('order_items', [{ order_id: idPesanan, nama_produk: 'Ongkir', qty: 1, harga_satuan: ongkirAktif }], 'return=minimal');
+        } catch (e) { itemsOk = false; console.error('[order] item ongkir gagal:', e.message); }
+      }
+      if (!itemsOk) {
+        await sbDel('order_items', { order_id: `eq.${idPesanan}` }).catch(() => {});
+        await sbDel('orders', { id: `eq.${idPesanan}` }).catch(() => {});
+        await tg.sendMessage(chatId, `❌ Order *${idPesanan}* DIBATALKAN: rincian item gagal disimpan ke database. Tidak ada tagihan yang dikirim. Coba lagi sebentar lagi.`, MD);
+        return;
       }
       // Generate & kirim invoice PDF
+      let invoiceWaOk = false;
       try {
         const { generateInvoice } = require('./invoice');
         const profile = await getProfile().catch(() => ({}));
@@ -1790,28 +1898,31 @@ async function handleTemplateOrder(chatId, text) {
         });
         if (upR.ok) {
           const publicUrl = `${SB_URL}/storage/v1/object/public/invoices/${fileName}`;
-          await queueWA(nowa, 'document', publicUrl, `Invoice-${idPesanan}.pdf`);
+          invoiceWaOk = await queueWA(nowa, 'document', publicUrl, `Invoice-${idPesanan}.pdf`);
         }
       } catch (e) { console.error('[bayar-toko] invoice gagal:', e.message); }
       // Produk digital + bayar di toko = sudah lunas → kunci stok & kirim konten sekarang
-      let digTerkirim = false;
+      let digTerkirim = false; let selesaiOk = true;
       if (digItems) {
         for (const di of digItems) await digital.lockStock(idPesanan, di.product.id, di.qty).catch(() => 0);
         const terkirim = await digital.deliverLocked(idPesanan, nowa).catch(() => null);
         if (terkirim) {
           digTerkirim = true;
-          await sbPatch('orders', { id: `eq.${idPesanan}` }, { status: 'selesai' }).catch(() => {});
+          try { await sbPatch('orders', { id: `eq.${idPesanan}` }, { status: 'selesai' }); }
+          catch (e) { selesaiOk = false; console.error('[digital-toko] patch selesai gagal:', e.message); }
           for (const t of terkirim) {
             await queueWA(nowa, 'text', `✅ *PESANAN SELESAI (${idPesanan})*\n\nBerikut pesanan digital kakak:\n\n${t.message}`);
           }
         }
       }
-      await logActivity('order', `Pesanan ${idPesanan} (bayar di toko): ${rp(totalKeseluruhan)}. Invoice dikirim.${digItems ? (digTerkirim ? ' Konten digital terkirim.' : ' Konten digital GAGAL terkirim.') : ''}`);
+      await logActivity('order', `Pesanan ${idPesanan} (bayar di toko): ${rp(totalKeseluruhan)}. Invoice ${invoiceWaOk ? 'dikirim' : 'GAGAL dikirim'}.${digItems ? (digTerkirim ? ' Konten digital terkirim.' : ' Konten digital GAGAL terkirim.') : ''}`);
       await tg.sendMessage(chatId, digItems
         ? (digTerkirim
-          ? `✅ Sukses! Order digital *${idPesanan}* SELESAI — akun/link sudah dikirim ke WA customer.`
+          ? (selesaiOk
+            ? `✅ Sukses! Order digital *${idPesanan}* SELESAI — akun/link sudah dikirim ke WA customer.`
+            : `⚠️ Konten digital *${idPesanan}* TERKIRIM ke WA customer, tapi status order GAGAL diubah ke selesai di database. Ubah manual via dashboard.`)
           : `⚠️ Order *${idPesanan}* tersimpan, tapi pengiriman konten digital GAGAL. Cek stok digital.`)
-        : `✅ Sukses! Order *${idPesanan}* (bayar di toko). Invoice PDF dikirim ke WA customer.`, MD);
+        : `✅ Sukses! Order *${idPesanan}* (bayar di toko). ${invoiceWaOk ? 'Invoice PDF dikirim ke WA customer.' : '⚠️ Invoice PDF GAGAL dikirim ke WA customer — kirim manual ya.'}`, MD);
       return;
     }
     // Jika bayar QRIS: generate QRIS seperti biasa
@@ -1824,13 +1935,25 @@ async function handleTemplateOrder(chatId, text) {
       id: idPesanan, customer_id: customerId, nama_penerima: namaPenerima, nomor_wa: nowa, alamat_lengkap: alamatPenerima,
       total_harga: totalKeseluruhan, status: 'pending', payment_trx_id: qris.trx_id,
     }], 'return=minimal');
+    // Rincian item WAJIB lengkap — gagal = order dibatalkan sebelum QRIS dikirim
+    let itemsOkQ = true;
     for (let i = 0; i < prod.length; i++) {
       const q = parseInt(qty[i][1], 10) || 0; const h = parseInt(String(hrg[i][1]).replace(/[^0-9]/g, ''), 10) || 0;
       const diIt = digItems ? digItems[i] : null;
-      await sbPost('order_items', [{ order_id: idPesanan, product_id: diIt ? diIt.product.id : undefined, nama_produk: diIt ? diIt.product.nama : prod[i][1].trim(), qty: diIt ? diIt.qty : q, harga_satuan: diIt ? Number(diIt.product.harga || 0) : h }], 'return=minimal').catch(() => {});
+      try {
+        await sbPost('order_items', [{ order_id: idPesanan, product_id: diIt ? diIt.product.id : undefined, nama_produk: diIt ? diIt.product.nama : prod[i][1].trim(), qty: diIt ? diIt.qty : q, harga_satuan: diIt ? Number(diIt.product.harga || 0) : h }], 'return=minimal');
+      } catch (e) { itemsOkQ = false; console.error('[order] item gagal:', e.message); }
     }
-    if (ongkirAktif) {
-      await sbPost('order_items', [{ order_id: idPesanan, nama_produk: 'Ongkir', qty: 1, harga_satuan: ongkirAktif }], 'return=minimal').catch(() => {});
+    if (itemsOkQ && ongkirAktif) {
+      try {
+        await sbPost('order_items', [{ order_id: idPesanan, nama_produk: 'Ongkir', qty: 1, harga_satuan: ongkirAktif }], 'return=minimal');
+      } catch (e) { itemsOkQ = false; console.error('[order] item ongkir gagal:', e.message); }
+    }
+    if (!itemsOkQ) {
+      await sbDel('order_items', { order_id: `eq.${idPesanan}` }).catch(() => {});
+      await sbDel('orders', { id: `eq.${idPesanan}` }).catch(() => {});
+      await tg.sendMessage(chatId, `❌ Order *${idPesanan}* DIBATALKAN: rincian item gagal disimpan ke database. QRIS tidak dikirim ke customer. Coba lagi sebentar lagi.`, MD);
+      return;
     }
     // Produk digital: kunci stok utk order ini (konten dikirim panel begitu bayar terdeteksi)
     if (digItems) {

@@ -181,18 +181,30 @@ async function deliverLocked(orderId, nomorWa) {
   const now = new Date();
   for (const [pid, list] of byProduct) {
     const product = await getDigitalProduct(pid);
-    if (!product) continue;
+    if (!product) { console.error(`[digital] produk ${pid} tidak ditemukan — item order ${orderId} tetap dikunci (tidak dikirim sebagian)`); continue; }
     const kedaluwarsa = product.durasi_hari > 0
       ? new Date(now.getTime() + product.durasi_hari * 24 * 3600 * 1000).toISOString()
       : null;
+    // Klaim ATOMIK anti-dobel: item hanya beralih ke terjual bila statusnya MASIH
+    // dikunci. Dua pengirim balapan (panel vs Telegram) → yang kalah membaca 0 baris
+    // dan item itu tidak dikirim dua kali.
+    const terkirimList = [];
     for (const it of list) {
-      await sbPatch('stok_digital', { id: `eq.${it.id}` }, {
-        status: 'terjual', nomor_wa: nomorWa || null,
-        dikirim_at: now.toISOString(), kedaluwarsa_at: kedaluwarsa,
+      const q = new URLSearchParams({ id: `eq.${it.id}`, status: 'eq.dikunci' });
+      const res = await fetch(`${SB_URL}/rest/v1/stok_digital?${q}`, {
+        method: 'PATCH', headers: { ...sbHeaders(), Prefer: 'return=representation' },
+        body: JSON.stringify({
+          status: 'terjual', nomor_wa: nomorWa || null,
+          dikirim_at: now.toISOString(), kedaluwarsa_at: kedaluwarsa,
+        }),
       });
+      if (!res.ok) throw new Error(`Supabase PATCH stok_digital: ${res.status}`);
+      const upd = await res.json().catch(() => []);
+      if (upd.length) terkirimList.push(it);
     }
+    if (!terkirimList.length) continue; // sudah diklaim pengirim lain
     await syncProductStock(pid);
-    out.push({ product, message: composeDelivery(product, list), kedaluwarsa });
+    out.push({ product, message: composeDelivery(product, terkirimList), kedaluwarsa });
   }
   return out.length ? out : null;
 }

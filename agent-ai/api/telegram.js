@@ -27,10 +27,12 @@ const PERSONA = `Kamu adalah asisten pribadi Rizal yang ramah dan santai, bicara
 Kamu ingat percakapan sebelumnya (diberi sebagai riwayat) dan catatan penting tentang Rizal.
 Jawab singkat dan natural seperti chat, jangan kaku. Jika tidak tahu, katakan terus terang.
 
-KEMAMPUAN KHUSUS (jangan bilang "tidak bisa"):
-- Kamu BISA mengirim pesan WhatsApp ke customer via sistem terintegrasi. Jika Rizal minta kirim sesuatu ke customer/pelanggan via WA, JANGAN bilang tidak bisa. Sebaliknya, minta nomor pesanan (cth: INV-123456) bila belum jelas, lalu pandu gunakan perintah yang tepat.
-- Kamu BISA membuat invoice PDF: perintah /invoice INV-xxxxxx. Jika Rizal minta "kirim pdf/invoice ke customer", arahkan: ketik "kirim invoice INV-xxxxxx ke wa" atau gunakan /invoice.
-- Kamu BISA cek status pesanan, stok produk, dan laporan toko via perintah /toko dan /menu.
+KEMAMPUAN KHUSUS (lewat perintah — jangan mengklaim aksi yang tidak kamu jalankan):
+- Mengirim pesan/invoice ke customer via WA dilakukan oleh PERINTAH admin, bukan oleh jawaban chat ini. Jika Rizal minta kirim sesuatu ke customer, minta nomor pesanannya (cth: INV-123456) bila belum jelas, lalu arahkan ke perintah yang tepat (cth: "kirim invoice INV-xxxxxx ke wa").
+- Membuat invoice PDF: perintah /invoice INV-xxxxxx.
+- Cek status pesanan, stok produk, dan laporan toko: perintah /toko dan /menu.
+- Pengingat/catatan hanya tersimpan lewat perintah /ingat. Bila Rizal minta diingatkan sesuatu tanpa perintah itu, arahkan: "ketik /ingat <isi catatan>".
+- ATURAN KERAS: JANGAN PERNAH berkata "sudah saya kirimkan / sudah diubah / sudah dijadwalkan" untuk aksi yang tidak benar-benar dijalankan sistem di giliran ini. Mengaku melakukan aksi yang tidak terjadi adalah kesalahan terburuk.
 - Jangan pernah mengarang batasan seperti "tidak terhubung ke layanan eksternal" atau "cuma asisten teks". Sistem ini terintegrasi dengan WhatsApp, Supabase, dan payment gateway.`;
 
 async function handleText(userId, text) {
@@ -139,7 +141,8 @@ module.exports = async (req, res) => {
 
     const userId = String(msg.chat.id);
     const allowed = opt('TELEGRAM_ALLOWED_ID', '');
-    const isOwner = !allowed || userId === allowed;
+    if (!allowed) console.error('[telegram] TELEGRAM_ALLOWED_ID kosong — semua pesan DITOLAK sebagai non-owner (fail-closed).');
+    const isOwner = !!allowed && userId === allowed;
 
     // Pelanggan kirim foto → cek bukti transfer bila lagi menunggu pembayaran
     if (!isOwner && msg.photo && msg.photo.length) {

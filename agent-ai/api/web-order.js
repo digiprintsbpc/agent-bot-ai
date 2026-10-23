@@ -121,7 +121,11 @@ module.exports = async (req, res) => {
 
       const b = await body(req);
       const nama = String(b.nama || '').trim().slice(0, 60);
-      const wa = String(b.wa || '').replace(/\D/g, '');
+      // Normalisasi WA ke format 62 (konsisten dgn jalur Telegram) — cegah customer
+      // ganda format 08/62 & pastikan JID WhatsApp panel valid.
+      let wa = String(b.wa || '').replace(/\D/g, '');
+      if (wa.startsWith('0')) wa = '62' + wa.slice(1);
+      else if (wa.startsWith('8')) wa = '62' + wa;
       const alamat = String(b.alamat || '').trim().slice(0, 300);
       const itemsIn = Array.isArray(b.items) ? b.items.slice(0, 10) : [];
 
@@ -136,8 +140,9 @@ module.exports = async (req, res) => {
       let adaDigital = false;
       for (const it of itemsIn) {
         const pid = String(it.id || '');
-        const qty = Math.max(1, Math.min(100, parseInt(it.qty, 10) || 0));
-        if (!pid || !qty) return res.status(400).json({ ok: false, error: 'Item tidak valid' });
+        const qtyRaw = parseInt(it.qty, 10);
+        if (!pid || !Number.isFinite(qtyRaw) || qtyRaw < 1) return res.status(400).json({ ok: false, error: 'Item tidak valid' });
+        const qty = Math.min(100, qtyRaw);
         const rows = await sbGet('products', { select: 'id,nama,harga,tipe', id: `eq.${pid}`, limit: 1 });
         const p = rows[0];
         if (!p) return res.status(400).json({ ok: false, error: `Produk ${pid} tidak ditemukan` });
@@ -155,6 +160,16 @@ module.exports = async (req, res) => {
       }
       if (total <= 0) return res.status(400).json({ ok: false, error: 'Total tidak valid' });
 
+      // Anti order ganda: order web pending yang sama (WA + total) dalam 2 menit
+      // terakhir dianggap pengiriman ulang — kembalikan order yang sudah ada.
+      try {
+        const recent = await sbGet('orders', { select: 'id,total_harga,tanggal', nomor_wa: `eq.${wa}`, status: 'eq.pending', catatan: 'eq.web-kantor', order: 'tanggal.desc', limit: 5 });
+        const dup = recent.find((o) => Number(o.total_harga) === total && (Date.now() - new Date(o.tanggal).getTime()) < 2 * 60 * 1000);
+        if (dup) {
+          return res.status(200).json({ ok: true, id: dup.id, duplikat: true, error: 'Order yang sama baru saja dibuat — QRIS-nya sudah dikirim ke WA kakak. Cek WhatsApp ya 🙏' });
+        }
+      } catch { /* cek duplikat gagal → lanjut buat order */ }
+
       const orderId = await genOrderId();
       const digital = require('../lib/digital');
 
@@ -169,6 +184,18 @@ module.exports = async (req, res) => {
         }
       }
 
+      // QRIS dibuat SEBELUM order disimpan → payment_trx_id ikut dalam SATU tulisan
+      // order (tidak ada PATCH terpisah yang bisa gagal diam-diam).
+      let qris = null;
+      try {
+        const payinaja = require('../lib/payinaja');
+        qris = await payinaja.createQRIS(total, orderId, nama, wa);
+      } catch (e) { console.error('[web-order] QRIS error:', e.message); }
+      if (!qris || !qris.ok) {
+        if (adaDigital) await digital.releaseLock(orderId).catch(() => {});
+        return res.status(502).json({ ok: false, error: 'QRIS gagal dibuat. Coba lagi sebentar ya 🙏' });
+      }
+
       // Customer: cari by WA, buat bila belum ada
       let customerId = null;
       try {
@@ -180,26 +207,23 @@ module.exports = async (req, res) => {
         }
       } catch { /* order tetap dibuat walau customer gagal tersimpan */ }
 
-      await sbPost('orders', [{
-        id: orderId, customer_id: customerId, nama_penerima: nama, nomor_wa: wa,
-        alamat_lengkap: alamat, total_harga: total, status: 'pending', catatan: 'web-kantor',
-      }]);
-      await sbPost('order_items', items.map((it) => ({
-        order_id: orderId, product_id: it.id, nama_produk: it.nama, qty: it.qty, harga_satuan: it.harga,
-      })));
-
-      // QRIS
-      let qris = null;
       try {
-        const payinaja = require('../lib/payinaja');
-        qris = await payinaja.createQRIS(total, orderId, nama, wa);
-      } catch (e) { console.error('[web-order] QRIS error:', e.message); }
-      if (!qris || !qris.ok) {
-        await sbPatch('orders', { id: `eq.${orderId}` }, { status: 'batal' }).catch(() => {});
+        await sbPost('orders', [{
+          id: orderId, customer_id: customerId, nama_penerima: nama, nomor_wa: wa,
+          alamat_lengkap: alamat, total_harga: total, status: 'pending', catatan: 'web-kantor',
+          payment_trx_id: qris.trx_id,
+        }]);
+        await sbPost('order_items', items.map((it) => ({
+          order_id: orderId, product_id: it.id, nama_produk: it.nama, qty: it.qty, harga_satuan: it.harga,
+        })));
+      } catch (e) {
+        // Kompensasi: jangan tinggalkan order setengah jadi / kunci stok yatim
+        console.error('[web-order] simpan order gagal:', e.message);
+        await fetch(`${SB_URL}/rest/v1/order_items?order_id=eq.${orderId}`, { method: 'DELETE', headers: { apikey: SB_KEY } }).catch(() => {});
+        await fetch(`${SB_URL}/rest/v1/orders?id=eq.${orderId}`, { method: 'DELETE', headers: { apikey: SB_KEY } }).catch(() => {});
         if (adaDigital) await digital.releaseLock(orderId).catch(() => {});
-        return res.status(502).json({ ok: false, error: 'QRIS gagal dibuat. Coba lagi sebentar ya 🙏' });
+        return res.status(500).json({ ok: false, error: 'Gangguan server saat menyimpan pesanan. Coba lagi sebentar ya 🙏' });
       }
-      await sbPatch('orders', { id: `eq.${orderId}` }, { payment_trx_id: qris.trx_id }).catch(() => {});
 
       // WA ke customer: ringkasan + QRIS (sama seperti jalur lain; berguna bila halaman ditutup)
       try {

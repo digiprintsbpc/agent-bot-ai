@@ -52,19 +52,30 @@ async function sbPatch(table, match, data) {
   const q = new URLSearchParams(match);
   const r = await fetch(`${SB_URL}/rest/v1/${table}?${q}`, {
     method: 'PATCH',
-    headers: { apikey: SB_KEY, 'Content-Type': 'application/json' },
+    headers: { apikey: SB_KEY, 'Content-Type': 'application/json', Prefer: 'return=representation' },
     body: JSON.stringify(data),
   });
   if (!r.ok) throw new Error(`${table} patch: ${r.status} ${await r.text().catch(() => '')}`.slice(0, 200));
+  return r.json().catch(() => []);
 }
 
 async function sbDelete(table, match) {
   const q = new URLSearchParams(match);
   const r = await fetch(`${SB_URL}/rest/v1/${table}?${q}`, {
     method: 'DELETE',
-    headers: { apikey: SB_KEY },
+    headers: { apikey: SB_KEY, Prefer: 'return=representation' },
   });
   if (!r.ok) throw new Error(`${table} delete: ${r.status}`);
+  return r.json().catch(() => []);
+}
+
+/** Bebaskan kunci stok digital milik sebuah order (order batal/dihapus) + sinkron stok produk terkait. */
+async function releaseDigitalLock(orderId) {
+  const locked = await sbGet('stok_digital', { select: 'id,produk_id', order_id: `eq.${orderId}`, status: 'eq.dikunci', limit: 500 });
+  if (!locked.length) return 0;
+  await sbPatch('stok_digital', { order_id: `eq.${orderId}`, status: 'eq.dikunci' }, { status: 'tersedia', order_id: null });
+  for (const pid of [...new Set(locked.map((x) => x.produk_id))]) await syncDigitalStock(pid).catch(() => {});
+  return locked.length;
 }
 
 /** Sinkronkan products.stok produk digital = jumlah stok_digital tersedia. */
@@ -163,7 +174,8 @@ module.exports = async (req, res) => {
     if (method === 'GET' && action === 'keuangan') {
       const bulanIni = wibDayStart(0).slice(0, 7); // YYYY-MM (UTC approx, cukup)
       const orders = await sbGet('orders', {
-        select: 'total_harga,tanggal', status: 'neq.batal', tanggal: `gte.${wibDayStart(30)}`, limit: 1000,
+        // Omset hanya dari order yang SUDAH DIBAYAR (pending = belum bayar, batal = gagal)
+        select: 'total_harga,tanggal', status: 'in.(diproses,dikirim,selesai)', tanggal: `gte.${wibDayStart(30)}`, limit: 1000,
       });
       const sum = (arr) => arr.reduce((a, o) => a + Number(o.total_harga || 0), 0);
       const hariIni = wibDayStart(0);
@@ -195,7 +207,9 @@ module.exports = async (req, res) => {
         const orderId = await genOrderId();
         // customer: cari by WA, buat bila belum ada
         let customerId = null;
-        const cWa = String(wa || '').replace(/\D/g, '');
+        let cWa = String(wa || '').replace(/\D/g, '');
+        if (cWa.startsWith('0')) cWa = '62' + cWa.slice(1);
+        else if (cWa.startsWith('8')) cWa = '62' + cWa;
         if (cWa) {
           try {
             const found = await sbGet('customers', { select: 'id', nomor_wa: `eq.${cWa}`, limit: 1 });
@@ -208,10 +222,19 @@ module.exports = async (req, res) => {
             } catch {}
           }
         }
+        // QRIS dibuat SEBELUM order disimpan → payment_trx_id ikut SATU tulisan order
+        let qrUrl = null;
+        let trxId = null;
+        try {
+          const payinaja = require('../lib/payinaja');
+          const qris = await payinaja.createQRIS(total, orderId, String(nama || '-'), cWa);
+          if (qris.ok) { qrUrl = qris.qr_image_url; trxId = qris.trx_id; }
+        } catch (e) { console.error('[dash] QRIS gagal:', e.message); }
         await sbPost('orders', [{
           id: orderId, customer_id: customerId,
           nama_penerima: String(nama || '-'), nomor_wa: cWa,
           alamat_lengkap: String(alamat || ''), total_harga: total, status: 'pending',
+          payment_trx_id: trxId,
         }]);
         await sbPost('order_items', [{
           order_id: orderId, product_id: null, nama_produk: namaProduk,
@@ -220,16 +243,6 @@ module.exports = async (req, res) => {
         // Notifikasi: WA ke customer (tagihan + QRIS) + Telegram ke owner
         try {
           const rpF = (n) => 'Rp ' + Number(n || 0).toLocaleString('id-ID');
-          // Generate QRIS
-          let qrUrl = null;
-          try {
-            const payinaja = require('../lib/payinaja');
-            const qris = await payinaja.createQRIS(total, orderId, String(nama || '-'), cWa);
-            if (qris.ok) {
-              qrUrl = qris.qr_image_url;
-              await sbPatch('orders', { id: `eq.${orderId}` }, { payment_trx_id: qris.trx_id }).catch(() => {});
-            }
-          } catch (e) { console.error('[dash] QRIS gagal:', e.message); }
           if (cWa.length >= 10) {
             const tagihan = `🧾 *PESANAN BARU (${orderId})*\n\nHalo kak ${nama}! Terima kasih sudah order di Digiprint.\n\n📦 ${namaProduk}\nJumlah: ${q}\n*Total: ${rpF(total)}*\n\n${qrUrl ? 'Silakan scan QRIS di bawah untuk bayar 👇' : 'Silakan lakukan pembayaran. Kirim bukti transfer ke sini ya kak 🙏'}`;
             if (qrUrl) {
@@ -259,7 +272,10 @@ module.exports = async (req, res) => {
         const id = String(b.id || '').toUpperCase();
         const status = String(b.status || '');
         if (!STATUS_OK.includes(status)) return res.status(400).json({ ok: false, error: 'Status tidak valid' });
-        await sbPatch('orders', { id: `eq.${id}` }, { status });
+        const upd = await sbPatch('orders', { id: `eq.${id}` }, { status });
+        if (!upd.length) return res.status(404).json({ ok: false, error: `Order ${id} tidak ditemukan — tidak ada yang berubah.` });
+        // Gelombang 3: batal/hapus order digital pending → bebaskan kunci stoknya
+        if (status === 'batal') { try { await releaseDigitalLock(id); } catch (e) { console.error('[dash] releaseLock gagal:', e.message); } }
         // Notifikasi WA ke customer saat status berubah
         try {
           const ords = await sbGet('orders', { select: 'nama_penerima,nomor_wa,nomor_resi', id: `eq.${id}`, limit: 1 });
@@ -285,7 +301,9 @@ module.exports = async (req, res) => {
         let okCount = 0;
         for (const id of ids.slice(0, 50)) {
           try {
-            await sbPatch('orders', { id: `eq.${id}` }, { status });
+            const upd = await sbPatch('orders', { id: `eq.${id}` }, { status });
+            if (!upd.length) { console.error('[dash] bulk-update: order tidak ditemukan:', id); continue; }
+            if (status === 'batal') { try { await releaseDigitalLock(id); } catch (e) { console.error('[dash] releaseLock gagal:', e.message); } }
             try {
               const ords = await sbGet('orders', { select: 'nama_penerima,nomor_wa,nomor_resi', id: `eq.${id}`, limit: 1 });
               const o = ords[0];
@@ -300,7 +318,7 @@ module.exports = async (req, res) => {
             okCount++;
           } catch (e) { console.error('[dash] bulk-update gagal:', id, e.message); }
         }
-        return res.status(200).json({ ok: true, updated: okCount, total: ids.length });
+        return res.status(200).json({ ok: true, updated: okCount, total: Math.min(ids.length, 50), diminta: ids.length });
       }
 
       if (action === 'bulk-delete') {
@@ -309,12 +327,13 @@ module.exports = async (req, res) => {
         let okCount = 0;
         for (const id of ids.slice(0, 50)) {
           try {
-            await sbDelete('order_items', { order_id: `eq.${id}` }).catch(() => {});
-            await sbDelete('orders', { id: `eq.${id}` });
-            okCount++;
+            try { await releaseDigitalLock(id); } catch (e) { console.error('[dash] releaseLock gagal:', e.message); }
+            await sbDelete('order_items', { order_id: `eq.${id}` });
+            const del = await sbDelete('orders', { id: `eq.${id}` });
+            if (del.length) okCount++;
           } catch (e) { console.error('[dash] bulk-delete gagal:', id, e.message); }
         }
-        return res.status(200).json({ ok: true, deleted: okCount, total: ids.length });
+        return res.status(200).json({ ok: true, deleted: okCount, total: Math.min(ids.length, 50), diminta: ids.length });
       }
 
       if (action === 'update-product') {
@@ -323,7 +342,9 @@ module.exports = async (req, res) => {
         if (b.harga !== undefined && b.harga !== '') data.harga = Number(b.harga);
         if (b.stok !== undefined && b.stok !== '') data.stok = Number(b.stok);
         if (!Object.keys(data).length) return res.status(400).json({ ok: false, error: 'Tidak ada perubahan' });
-        await sbPatch('products', { id: `eq.${id}` }, data);
+        if (Object.values(data).some((v) => Number.isNaN(v) || v < 0)) return res.status(400).json({ ok: false, error: 'Harga/stok tidak valid' });
+        const updP = await sbPatch('products', { id: `eq.${id}` }, data);
+        if (!updP.length) return res.status(404).json({ ok: false, error: `Produk ${id} tidak ditemukan — tidak ada yang berubah.` });
         return res.status(200).json({ ok: true });
       }
 
@@ -340,7 +361,8 @@ module.exports = async (req, res) => {
 
       if (action === 'delete-product') {
         const id = String(b.id || '');
-        await sbDelete('products', { id: `eq.${id}` });
+        const delP = await sbDelete('products', { id: `eq.${id}` });
+        if (!delP.length) return res.status(404).json({ ok: false, error: `Produk ${id} tidak ditemukan — tidak ada yang terhapus.` });
         return res.status(200).json({ ok: true });
       }
 

@@ -183,6 +183,12 @@ module.exports = async (req, res) => {
     if (String(req.query?.publik || '') === '1') {
       return res.status(200).json(buildStatePublik());
     }
+    // Mode PENUH berisi potongan aktivitas privat (isi catatan, potongan pesan) —
+    // wajib PIN dashboard. Tanpa PIN yang benar: tolak, jangan bocorkan.
+    const pinBenar = process.env.DASHBOARD_PIN || '1234';
+    if (String(req.query?.pin || '') !== pinBenar) {
+      return res.status(401).json({ ok: false, error: 'PIN diperlukan untuk mode penuh' });
+    }
     const events = await getActivities(80);
     res.status(200).json(buildState(events));
   } catch (e) {
