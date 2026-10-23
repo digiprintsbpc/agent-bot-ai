@@ -737,6 +737,42 @@ async function handleMessage(chatId, msg) {
       return true;
     }
 
+    // ===== KIRIM QRIS ULANG: customer pending minta QRIS lagi =====
+    // QRIS baru dibuat utk order pending yang sama, payment_trx_id diganti
+    // (terverifikasi) agar panel mendeteksi pembayaran dari QRIS terbaru.
+    const kirimQrisMatch = text.match(/^kirim\s+qris\s+(INV-\d{6})/i);
+    if (kirimQrisMatch) {
+      const oid = kirimQrisMatch[1].toUpperCase();
+      try {
+        const rows = await sbGet('orders', { select: 'id,status,nama_penerima,nomor_wa,total_harga', id: `eq.${oid}` });
+        if (!rows.length) {
+          await tg.sendMessage(chatId, `❌ Order *${oid}* tidak ditemukan di database.`, MD);
+          return true;
+        }
+        const o = rows[0];
+        if (o.status !== 'pending') {
+          await tg.sendMessage(chatId, `ℹ️ Order *${oid}* statusnya *${o.status}*, bukan pending — QRIS tidak dibuat ulang.`, MD);
+          return true;
+        }
+        const qrisBaru = await payinaja.createQRIS(Number(o.total_harga), oid, o.nama_penerima, o.nomor_wa);
+        if (!qrisBaru.ok || !qrisBaru.qr_image_url) {
+          await tg.sendMessage(chatId, `❌ QRIS gagal dibuat ulang untuk *${oid}*: ${qrisBaru.error || 'unknown'}`, MD);
+          return true;
+        }
+        const upd = await sbPatchRows('orders', { id: `eq.${oid}` }, { payment_trx_id: qrisBaru.trx_id });
+        if (!upd.length) throw new Error('payment_trx_id baru gagal disimpan');
+        const caption = `🧾 *QRIS PEMBAYARAN (${oid})*\n\nHalo kak ${o.nama_penerima}! Ini QRIS untuk pesanan kakak, total *${rp(Number(o.total_harga))}*.\n\nSilakan scan QRIS terbaru ini ya kak — QRIS yang lama tidak berlaku lagi 🙏`;
+        const waOk = await queueWA(o.nomor_wa, 'image', qrisBaru.qr_image_url, caption, qrisBaru.qr_image_url);
+        await logActivity('kirim_qris', `${oid} QRIS ulang dibuat & ${waOk ? 'terkirim' : 'GAGAL antre'} ke WA ${o.nomor_wa}.`);
+        await tg.sendMessage(chatId, waOk
+          ? `✅ QRIS baru *${oid}* terkirim ke WA ${o.nama_penerima} (${o.nomor_wa}).\n⚠️ QRIS lama order ini sudah tidak berlaku — deteksi bayar mengikuti QRIS terbaru.`
+          : `❌ QRIS *${oid}* berhasil dibuat tapi GAGAL masuk antrean WA. Coba lagi sebentar lagi.`, MD);
+      } catch (e) {
+        await tg.sendMessage(chatId, `❌ Gagal kirim QRIS ulang *${oid}*: ${e.message}`, MD);
+      }
+      return true;
+    }
+
     // ===== PERCAKAPAN: edit/hapus/status massal =====
     if (/^(edit|hapus|status|ubah)\s+massal$/i.test(text.trim())) {
       const aksi = text.trim().toLowerCase().split(' ')[0];
@@ -1779,9 +1815,18 @@ async function handleMarketplace(chatId, text) {
 
 // ---------- Template order terisi → buat order + QRIS ----------
 async function handleTemplateOrder(chatId, text) {
-  const waMatch = text.match(/Nomor wa Penerima:\s*(.+)/i);
+  // Nomor WA: terima variasi label ("Nomor wa Penerima", "Nomor wa", "No WA",
+  // "Nomor WhatsApp") & format nomor bebas (08…, +62 …, spasi/strip) — template
+  // dari sumber mana pun harus tetap terbaca.
+  let waMatch = text.match(/Nomor\s*(?:wa|whatsapp|hp)\s*(?:Penerima)?\s*:\s*(.+)/i)
+    || text.match(/No\.?\s*(?:wa|whatsapp|hp)\s*(?:Penerima)?\s*:\s*(.+)/i);
   if (!waMatch) {
-    await tg.sendMessage(chatId, '❌ WA wajib isi!');
+    // Cadangan: baris mana pun yang menyebut wa/whatsapp/hp dan memuat ≥9 digit
+    const barisWa = text.split(/\n/).find((l) => /\b(wa|whatsapp|hp)\b/i.test(l) && l.replace(/[^0-9]/g, '').length >= 9);
+    if (barisWa) waMatch = [null, barisWa];
+  }
+  if (!waMatch || formatWA(waMatch[1]).length < 10) {
+    await tg.sendMessage(chatId, '❌ WA wajib isi! Pastikan ada baris nomor WA, contoh: "Nomor wa: 081234567890".');
     return;
   }
   const namaMatch = text.match(/Nama Penerima:\s*(.+)/i);
