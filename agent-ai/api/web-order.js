@@ -228,7 +228,7 @@ module.exports = async (req, res) => {
       // WA ke customer: ringkasan + QRIS (sama seperti jalur lain; berguna bila halaman ditutup)
       try {
         const ringkas = items.map((it) => `📦 ${it.nama} ×${it.qty}`).join('\n');
-        const tagihan = `🧾 *PESANAN BARU (${orderId})*\n\nHalo kak ${nama}! Terima kasih sudah order di Digiprint lewat kantor virtual kami 🏢\n\n${ringkas}\n*Total: ${rp(total)}*\n\nSilakan scan QRIS di bawah untuk bayar 👇`;
+        const tagihan = `🧾 *PESANAN BARU (${orderId})*\n\nHalo kak ${nama}! Terima kasih sudah order di Digiprint lewat kantor virtual kami 🏢\n\n${ringkas}\n*Total: ${rp(total)}*\n\n⏰ *QRIS aktif 10 menit saja* — kalau sudah lewat, jangan di-scan ya kak, minta QRIS baru ke admin.\nSilakan scan QRIS di bawah untuk bayar 👇`;
         if (qris.qr_image_url) {
           await sbPost('wa_outbox', [{ to_wa: wa, kind: 'image', status: 'pending', content: qris.qr_image_url, caption: tagihan, image_url: qris.qr_image_url }], 'return=minimal');
         } else {

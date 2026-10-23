@@ -430,7 +430,7 @@ async function handleCustomer(userId, text, onPhoto) {
           await sendMessage(OWNER_ID, `🔴 *${d.order_id}*: QRIS dibuat ulang tapi payment_trx_id GAGAL tersimpan — panel tidak bisa deteksi bayar order ini!`).catch(() => {});
         }
         await saveSession(userId, 'awaiting_payment', { ...d, trx_id: qris.trx_id });
-        const caption = `🧾 *Pesanan ${d.order_id}*\n${d.product_nama} × ${d.qty}\n*Total: ${rp(d.amount)}*\n\nSilakan scan QRIS di atas untuk membayar. Setelah bayar, ketik *SUDAH BAYAR*.`;
+        const caption = `🧾 *Pesanan ${d.order_id}*\n${d.product_nama} × ${d.qty}\n*Total: ${rp(d.amount)}*\n\n⏰ *QRIS aktif 10 menit saja* — kalau sudah lewat, jangan di-scan ya kak, kabari di sini nanti dibuatkan QRIS baru.\nSilakan scan QRIS di atas untuk membayar. Setelah bayar, ketik *SUDAH BAYAR*.`;
         if (onPhoto) { await onPhoto(qris.qr_image_url, caption); return null; }
         await sendPhoto(userId, qris.qr_image_url, caption);
         return null;
@@ -517,7 +517,7 @@ async function handleCustomer(userId, text, onPhoto) {
         if (r.qrUrl) {
           const newDraft = { ...d, order_id: r.orderId, trx_id: r.trxId, amount: r.total };
           await saveSession(userId, 'awaiting_payment', newDraft);
-          const caption = `🧾 *Pesanan ${r.orderId}*\n${d.product_nama} × ${d.qty}\n*Total: ${rp(r.total)}*\n\nSilakan scan QRIS di atas untuk membayar. Setelah bayar, ketik *SUDAH BAYAR*.`;
+          const caption = `🧾 *Pesanan ${r.orderId}*\n${d.product_nama} × ${d.qty}\n*Total: ${rp(r.total)}*\n\n⏰ *QRIS aktif 10 menit saja* — kalau sudah lewat, jangan di-scan ya kak, kabari di sini nanti dibuatkan QRIS baru.\nSilakan scan QRIS di atas untuk membayar. Setelah bayar, ketik *SUDAH BAYAR*.`;
           if (onPhoto) {
             await onPhoto(r.qrUrl, caption);
             return null; // pemanggil (WA) yang mengirim fotonya

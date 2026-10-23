@@ -761,7 +761,7 @@ async function handleMessage(chatId, msg) {
         }
         const upd = await sbPatchRows('orders', { id: `eq.${oid}` }, { payment_trx_id: qrisBaru.trx_id });
         if (!upd.length) throw new Error('payment_trx_id baru gagal disimpan');
-        const caption = `🧾 *QRIS PEMBAYARAN (${oid})*\n\nHalo kak ${o.nama_penerima}! Ini QRIS untuk pesanan kakak, total *${rp(Number(o.total_harga))}*.\n\nSilakan scan QRIS terbaru ini ya kak — QRIS yang lama tidak berlaku lagi 🙏`;
+        const caption = `🧾 *QRIS PEMBAYARAN (${oid})*\n\nHalo kak ${o.nama_penerima}! Ini QRIS untuk pesanan kakak, total *${rp(Number(o.total_harga))}*. QRIS ini aktif *10 menit* saja ya kak.\n\nSilakan scan QRIS terbaru ini ya kak — QRIS yang lama tidak berlaku lagi 🙏`;
         const waOk = await queueWA(o.nomor_wa, 'image', qrisBaru.qr_image_url, caption, qrisBaru.qr_image_url);
         await logActivity('kirim_qris', `${oid} QRIS ulang dibuat & ${waOk ? 'terkirim' : 'GAGAL antre'} ke WA ${o.nomor_wa}.`);
         await tg.sendMessage(chatId, waOk
@@ -2015,7 +2015,7 @@ async function handleTemplateOrder(chatId, text) {
       }
     }
     const qrisOk = await queueWA(nowa, 'image', qris.qr_image_url,
-      `Halo kak *${namaPenerima}*!\nID: *${idPesanan}*\n\n${detailStruk}\n*TOTAL: ${rp(totalKeseluruhan)}*\nSilakan scan QRIS untuk membayar.`);
+      `Halo kak *${namaPenerima}*!\nID: *${idPesanan}*\n\n${detailStruk}\n*TOTAL: ${rp(totalKeseluruhan)}*\n⏰ *QRIS aktif 10 menit saja* — kalau sudah lewat, jangan di-scan ya kak, minta QRIS baru ke admin.\nSilakan scan QRIS untuk membayar.`);
     await logActivity('order', `Pesanan baru ${idPesanan} (template admin): ${rp(totalKeseluruhan)}. QRIS ${qrisOk ? 'terkirim' : 'GAGAL dikirim'}.`);
     if (qrisOk) {
       await tg.sendMessage(chatId, `✅ Sukses! QRIS terkirim untuk *${idPesanan}*.${digItems ? '\n📩 Produk digital: akun/link terkirim otomatis begitu pembayaran terdeteksi.' : ''}`, MD);
