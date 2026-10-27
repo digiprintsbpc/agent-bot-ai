@@ -19,13 +19,10 @@ Tabel dan kolom yang tersedia:
 - customers(id, nama, nomor_wa, provinsi, kota_kabupaten, kecamatan, desa_kelurahan, patokan, kode_pos, alamat_lengkap)
 - order_summary(id, tanggal, nama_penerima, nomor_wa, nomor_resi, status, total_harga, jumlah_item, ringkasan_produk)
 - order_items(order_id, product_id, nama_produk, qty, harga_satuan) — isi barang per order; filter order_id "eq.INV-xxxxxx"
-- stok_digital(id, produk_id, status) — stok produk digital; status ∈ tersedia, dikunci, terjual.
-  STOK DIGITAL yang bisa dijual = JUMLAH BARIS status "tersedia" untuk produk_id itu (BUKAN kolom stok di products).
-  Untuk pertanyaan sisa stok digital: query tabel ini dengan filter {"produk_id": "eq.KODE", "status": "eq.tersedia"} dan limit 500.
 - pengeluaran(id, keterangan, nominal, tanggal) — biaya operasional toko.
 
 Tugas: baca pertanyaan user (Bahasa Indonesia), keluarkan SATU objek JSON saja:
-{"queries": [{"table": "orders|products|customers|order_summary|order_items|stok_digital|pengeluaran", "select": "kolom1,kolom2", "filter": {"kolom": "eq.nilai"}, "order": "kolom.desc", "limit": 20}]}
+{"queries": [{"table": "orders|products|customers|order_summary|order_items|pengeluaran", "select": "kolom1,kolom2", "filter": {"kolom": "eq.nilai"}, "order": "kolom.desc", "limit": 20}]}
 Aturan AGREGAT (omset, jumlah order, total pengeluaran): pakai limit 500 agar semua baris ikut terhitung.
 Aturan filter: "eq.nilai" sama dengan, "ilike.*teks*" mengandung teks, "gte.2026-10-01" tanggal >= , "lte.2026-10-18" tanggal <= .
 Untuk pencarian nomor WA/Hape: jika user memberi nomor lengkap (10+ digit) pakai "ilike.*nomor*"; jika hanya akhiran (mis. "3053", 4 digit) juga pakai "ilike.*3053*" pada kolom nomor_wa.
@@ -53,7 +50,6 @@ PENGETAHUAN PRODUK (toko nota NCR ini):
 - Ukuran yang paling biasa dipesan pelanggan: 1/2 folio dan 1/3 folio.
 - Saat user minta rekomendasi ukuran, sarankan 1/2 atau 1/3 folio dengan harga dari hasil query,
   dan pastikan stoknya > 0 — jangan tawarkan produk yang stoknya habis.
-  Khusus produk digital: stok yang berlaku adalah hitungan stok_digital tersedia (lihat aturan di prompt perencana), bukan kolom stok products.
 - Harga pasti mengikuti hasil query products, bukan ingatan.`;
 
 function parsePlan(raw) {

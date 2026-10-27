@@ -9,12 +9,10 @@
  * GET  ?action=katalog        → daftar produk yang bisa dibeli (harga > 0)
  * POST ?action=buat           → body {items:[{id,qty}], nama, wa, alamat}
  *                               buat order (pending) + QRIS PayinAja.
- *                               Order digital: stok dikunci dulu; campuran
- *                               digital+fisik ditolak (pisah order).
  * GET  ?action=status&id=INV- → { status } saja (untuk polling halaman tamu)
  *
  * Order yang lunas dideteksi panel seperti biasa (payment_trx_id) —
- * fisik: jadi diproses + invoice WA; digital: konten terkirim ke WA.
+ * jadi diproses + invoice WA.
  */
 
 const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
@@ -92,14 +90,6 @@ module.exports = async (req, res) => {
       for (const p of rows) {
         if (!(Number(p.harga) > 0)) continue; // harga belum diatur → tidak dijual dulu
         const item = { id: p.id, nama: p.nama, harga: Number(p.harga), tipe: p.tipe || 'fisik' };
-        if (item.tipe === 'digital') {
-          try {
-            const stok = await sbGet('stok_digital', {
-              select: 'id', produk_id: `eq.${p.id}`, status: 'eq.tersedia', limit: 5000,
-            });
-            item.stok = stok.length;
-          } catch { item.stok = 0; }
-        }
         produk.push(item);
       }
       return res.status(200).json({ ok: true, produk });
@@ -136,8 +126,6 @@ module.exports = async (req, res) => {
       // Validasi item terhadap database (harga SELALU dari DB)
       const items = [];
       let total = 0;
-      let adaFisik = false;
-      let adaDigital = false;
       for (const it of itemsIn) {
         const pid = String(it.id || '');
         const qtyRaw = parseInt(it.qty, 10);
@@ -147,15 +135,10 @@ module.exports = async (req, res) => {
         const p = rows[0];
         if (!p) return res.status(400).json({ ok: false, error: `Produk ${pid} tidak ditemukan` });
         if (!(Number(p.harga) > 0)) return res.status(400).json({ ok: false, error: `Produk ${p.nama} belum bisa dipesan` });
-        const tipe = p.tipe || 'fisik';
-        if (tipe === 'digital') adaDigital = true; else adaFisik = true;
-        items.push({ id: p.id, nama: p.nama, harga: Number(p.harga), qty, tipe });
+        items.push({ id: p.id, nama: p.nama, harga: Number(p.harga), qty });
         total += Number(p.harga) * qty;
       }
-      if (adaFisik && adaDigital) {
-        return res.status(400).json({ ok: false, error: 'Pesanan produk fisik dan digital harus dipisah ya kak 🙏' });
-      }
-      if (adaFisik && alamat.length < 10) {
+      if (alamat.length < 10) {
         return res.status(400).json({ ok: false, error: 'Alamat lengkap wajib diisi untuk pengiriman' });
       }
       if (total <= 0) return res.status(400).json({ ok: false, error: 'Total tidak valid' });
@@ -171,18 +154,6 @@ module.exports = async (req, res) => {
       } catch { /* cek duplikat gagal → lanjut buat order */ }
 
       const orderId = await genOrderId();
-      const digital = require('../lib/digital');
-
-      // Digital: kunci stok SEBELUM order dibuat; gagal = tidak jadi order
-      if (adaDigital) {
-        for (const it of items) {
-          const locked = await digital.lockStock(orderId, it.id, it.qty).catch(() => 0);
-          if (!locked || locked < it.qty) {
-            await digital.releaseLock(orderId).catch(() => {});
-            return res.status(400).json({ ok: false, error: `Stok ${it.nama} tidak cukup / habis` });
-          }
-        }
-      }
 
       // QRIS dibuat SEBELUM order disimpan → payment_trx_id ikut dalam SATU tulisan
       // order (tidak ada PATCH terpisah yang bisa gagal diam-diam).
@@ -192,7 +163,6 @@ module.exports = async (req, res) => {
         qris = await payinaja.createQRIS(total, orderId, nama, wa);
       } catch (e) { console.error('[web-order] QRIS error:', e.message); }
       if (!qris || !qris.ok) {
-        if (adaDigital) await digital.releaseLock(orderId).catch(() => {});
         return res.status(502).json({ ok: false, error: 'QRIS gagal dibuat. Coba lagi sebentar ya 🙏' });
       }
 
@@ -217,11 +187,10 @@ module.exports = async (req, res) => {
           order_id: orderId, product_id: it.id, nama_produk: it.nama, qty: it.qty, harga_satuan: it.harga,
         })));
       } catch (e) {
-        // Kompensasi: jangan tinggalkan order setengah jadi / kunci stok yatim
+        // Kompensasi: jangan tinggalkan order setengah jadi
         console.error('[web-order] simpan order gagal:', e.message);
         await fetch(`${SB_URL}/rest/v1/order_items?order_id=eq.${orderId}`, { method: 'DELETE', headers: { apikey: SB_KEY } }).catch(() => {});
         await fetch(`${SB_URL}/rest/v1/orders?id=eq.${orderId}`, { method: 'DELETE', headers: { apikey: SB_KEY } }).catch(() => {});
-        if (adaDigital) await digital.releaseLock(orderId).catch(() => {});
         return res.status(500).json({ ok: false, error: 'Gangguan server saat menyimpan pesanan. Coba lagi sebentar ya 🙏' });
       }
 

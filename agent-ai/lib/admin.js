@@ -29,7 +29,6 @@
 const tg = require('./telegram-api');
 const { ocrImage, extractResiInfo, extractAllNumbers } = require('./ocr');
 const payinaja = require('./payinaja');
-const digital = require('./digital');
 
 const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SB_KEY = process.env.SUPABASE_SERVICE_KEY || '';
@@ -638,34 +637,6 @@ async function handleMessage(chatId, msg) {
 
   const st = await getAdminState(chatId);
   if (!st) {
-    // ===== PRODUK DIGITAL: cek stok deterministik dari DB (BUKAN tebakan AI) =====
-    // "cek stok cc7d" / "stok gem1b" → produk + jumlah stok tersedia
-    const stokDigMatch = text.match(/^(?:cek\s+)?stok\s+(.+)$/i);
-    if (stokDigMatch) {
-      const mD = await digital.matchDigital(stokDigMatch[1].trim()).catch(() => ({ product: null }));
-      if (mD.product) {
-        const nD = await digital.countStock(mD.product.id).catch(() => 0);
-        await tg.sendMessage(chatId,
-          `📦 *${mD.product.nama}* (${mD.product.id})\nHarga: ${rp(Number(mD.product.harga || 0))}\nStok tersedia: *${nD}*${nD === 0 ? '\n\nStok masih kosong — isi lewat dashboard → tab 📱 Produk Digital.' : ''}`, MD);
-        return true;
-      }
-      // bukan produk digital → biarkan mengalir ke skill toko (stok fisik)
-    }
-    // Kata "digital" saja → ringkasan semua produk digital + stoknya
-    if (/^digital$/i.test(text.trim())) {
-      const prodsD = await digital.getDigitalProducts().catch(() => []);
-      if (prodsD.length) {
-        let msgD = '📱 *PRODUK DIGITAL*\n';
-        for (const pD of prodsD) {
-          const nD2 = await digital.countStock(pD.id).catch(() => 0);
-          msgD += `\n• ${pD.nama} (${pD.id}) — ${rp(Number(pD.harga || 0))} — stok: *${nD2}*`;
-        }
-        msgD += '\n\nKelola lengkapnya di dashboard → tab 📱 Produk Digital.\nCek cepat: ketik `cek stok cc7d`.';
-        await tg.sendMessage(chatId, msgD, MD);
-        return true;
-      }
-    }
-
     // ===== UBAH STATUS ORDER bahasa bebas — deterministik & TERVERIFIKASI =====
     // "rubah status pesanan menjadi selesai" / "jadikan INV-123456 dikirim" dieksekusi
     // kode beneran di sini — TIDAK jatuh ke AI yang hanya bisa mengaku.
@@ -697,42 +668,6 @@ async function handleMessage(chatId, msg) {
         await tg.sendMessage(chatId, `✅ *Status berubah di database*\n${oid} — ${rows[0].nama_penerima} (${rp(Number(rows[0].total_harga || 0))})\nStatus: ${before} → *${target}*`, MD);
       } catch (e) {
         await tg.sendMessage(chatId, `❌ Gagal mengubah status *${oid}*: ${e.message}. Status di database TIDAK berubah.`, MD);
-      }
-      return true;
-    }
-
-    // ===== KIRIM DIGITAL: lepas konten digital yang ditahan verifikasi manual =====
-    // Pasangan jalur foto-OCR: konten digital tidak dilepas OCR sendirian; admin
-    // memverifikasi bukti transfer lalu melepasnya dengan perintah ini.
-    const kirimDigMatch = text.match(/^kirim\s+digital\s+(INV-\d{6})/i);
-    if (kirimDigMatch) {
-      const oid = kirimDigMatch[1].toUpperCase();
-      try {
-        const rows = await sbGet('orders', { select: 'id,status,nama_penerima,nomor_wa', id: `eq.${oid}` });
-        if (!rows.length) {
-          await tg.sendMessage(chatId, `❌ Order *${oid}* tidak ditemukan di database.`, MD);
-          return true;
-        }
-        const o = rows[0];
-        const terkirim = await digital.deliverLocked(oid, o.nomor_wa).catch(() => null);
-        if (!terkirim || !terkirim.length) {
-          await tg.sendMessage(chatId, `❌ Tidak ada konten terkunci untuk *${oid}* — mungkin sudah terkirim sebelumnya atau stoknya kosong.`, MD);
-          return true;
-        }
-        let selesaiOk = true;
-        try { await sbPatch('orders', { id: `eq.${oid}` }, { status: 'selesai' }); }
-        catch (e) { selesaiOk = false; console.error('[kirim-digital] patch selesai gagal:', e.message); }
-        let waOk = true;
-        for (const t of terkirim) {
-          const okQ = await queueWA(o.nomor_wa, 'text', `✅ *PESANAN SELESAI (${oid})*\n\nBerikut pesanan digital kakak:\n\n${t.message}`);
-          if (!okQ) waOk = false;
-        }
-        await logActivity('kirim_digital', `${oid} konten digital dilepas manual oleh admin. WA ${waOk ? 'OK' : 'GAGAL'}, status ${selesaiOk ? 'selesai' : 'GAGAL diubah'}.`);
-        await tg.sendMessage(chatId, waOk && selesaiOk
-          ? `✅ Konten digital *${oid}* terkirim ke WA ${o.nama_penerima} & status order selesai.`
-          : `⚠️ *${oid}* diproses sebagian — antre WA: ${waOk ? 'OK' : '❌ GAGAL'}, ubah status: ${selesaiOk ? 'OK' : '❌ GAGAL'}. Cek manual ya.`, MD);
-      } catch (e) {
-        await tg.sendMessage(chatId, `❌ Gagal melepas konten *${oid}*: ${e.message}`, MD);
       }
       return true;
     }
@@ -912,73 +847,6 @@ async function handleMessage(chatId, msg) {
       await handleFotoOtomatis(chatId, msg, text);
       return true;
     }
-    // ===== PRODUK DIGITAL: perintah chat (tanpa tombol) =====
-    if (/^tambah produk digital$/i.test(text)) {
-      await setAdminState(chatId, 'dig_nama', {});
-      await tg.sendMessage(chatId, '🆕 *TAMBAH PRODUK DIGITAL*\nNama produknya apa?', MD);
-      return true;
-    }
-    let mDig = text.match(/^tambah stok\s+(.+)$/i);
-    if (mDig) {
-      const { product, ambiguous } = await digital.matchDigital(mDig[1]).catch(() => ({ product: null, ambiguous: [] }));
-      if (ambiguous.length) {
-        await tg.sendMessage(chatId, 'Ada beberapa produk mirip:\n' + ambiguous.map((p) => `• \`${p.id}\` ${p.nama}`).join('\n') + '\n\nPakai kodenya ya, contoh: `tambah stok cc1b`', MD);
-        return true;
-      }
-      if (!product) {
-        await tg.sendMessage(chatId, `❌ Produk digital "${mDig[1]}" tidak ditemukan. Ketik "stok digital" untuk lihat daftar produk.`, MD);
-        return true;
-      }
-      await setAdminState(chatId, 'dig_stok', { produk_id: product.id });
-      const pakaiDua = /\{ISI2\}/.test(product.template_kirim || '');
-      await tg.sendMessage(chatId, `📥 *TAMBAH STOK ${product.id}* — ${product.nama}\nKirim stoknya, 1 baris = 1 item.${pakaiDua ? '\nFormat: email | password' : '\nFormat: 1 link per baris'}`, MD);
-      return true;
-    }
-    if (/^stok digital$/i.test(text)) {
-      const prods = await digital.getDigitalProducts().catch(() => []);
-      if (!prods.length) {
-        await tg.sendMessage(chatId, 'Belum ada produk digital. Ketik "tambah produk digital" untuk membuat.', MD);
-        return true;
-      }
-      let msgStok = '📦 *STOK PRODUK DIGITAL*';
-      for (const p of prods) {
-        const n = await digital.countStock(p.id).catch(() => 0);
-        msgStok += `\n• \`${p.id}\` ${p.nama} — stok: *${n}*`;
-      }
-      await tg.sendMessage(chatId, msgStok, MD);
-      return true;
-    }
-    mDig = text.match(/^stok\s+(.+)$/i);
-    if (mDig) {
-      const { product, ambiguous } = await digital.matchDigital(mDig[1]).catch(() => ({ product: null, ambiguous: [] }));
-      if (ambiguous.length) {
-        await tg.sendMessage(chatId, 'Ada beberapa produk mirip:\n' + ambiguous.map((p) => `• \`${p.id}\` ${p.nama}`).join('\n') + '\n\nPakai kodenya ya.', MD);
-        return true;
-      }
-      if (!product) {
-        await tg.sendMessage(chatId, `❌ Produk digital "${mDig[1]}" tidak ditemukan.`, MD);
-        return true;
-      }
-      const n = await digital.countStock(product.id).catch(() => 0);
-      await tg.sendMessage(chatId, `📦 \`${product.id}\` ${product.nama}\nStok tersedia: *${n}*`, MD);
-      return true;
-    }
-    mDig = text.match(/^edit template\s+(.+)$/i);
-    if (mDig) {
-      const { product, ambiguous } = await digital.matchDigital(mDig[1]).catch(() => ({ product: null, ambiguous: [] }));
-      if (ambiguous.length) {
-        await tg.sendMessage(chatId, 'Ada beberapa produk mirip:\n' + ambiguous.map((p) => `• \`${p.id}\` ${p.nama}`).join('\n') + '\n\nPakai kodenya ya.', MD);
-        return true;
-      }
-      if (!product) {
-        await tg.sendMessage(chatId, `❌ Produk digital "${mDig[1]}" tidak ditemukan.`, MD);
-        return true;
-      }
-      await setAdminState(chatId, 'dig_template_edit', { produk_id: product.id });
-      await tg.sendMessage(chatId, `✏️ *EDIT TEMPLATE ${product.id}*\nTemplate saat ini:\n\n${product.template_kirim || '(kosong)'}\n\nKirim template barunya (utuh). Jaga penanda {ISI} / {ISI2}.`, MD);
-      return true;
-    }
-
     // Perintah cepat marketplace: !\n[resi]\n[wa]
     if (text.startsWith('!')) {
       const r = await handleMarketplace(chatId, text);
@@ -1060,82 +928,6 @@ async function handleMessage(chatId, msg) {
     } else {
       await clearAdminState(chatId);
       await tg.sendMessage(chatId, '🚫 Broadcast dibatalkan.', MD);
-    }
-    return true;
-  }
-
-  // --- PRODUK DIGITAL: tambah produk (berjenjang) ---
-  if (step === 'dig_nama') {
-    await setAdminState(chatId, 'dig_kode', { nama: input });
-    await tg.sendMessage(chatId, 'Kode produknya apa? (pendek, huruf kecil, tanpa spasi — contoh: ccp1)', MD);
-    return true;
-  }
-  if (step === 'dig_kode') {
-    const kode = input.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (!kode) { await tg.sendMessage(chatId, '❌ Kode tidak valid. Coba lagi:', MD); return true; }
-    const semuaId = await sbGet('products', { select: 'id' }).catch(() => []);
-    const ada = semuaId.some((p) => String(p.id).toUpperCase() === kode.toUpperCase());
-    if (ada) { await tg.sendMessage(chatId, `❌ Kode ${kode} sudah dipakai produk lain. Kirim kode lain:`, MD); return true; }
-    await setAdminState(chatId, 'dig_harga', { ...d, kode });
-    await tg.sendMessage(chatId, 'Harganya berapa? (angka saja, contoh: 15000)', MD);
-    return true;
-  }
-  if (step === 'dig_harga') {
-    const hrgD = parseInt(input.replace(/[^0-9]/g, ''), 10) || 0;
-    await setAdminState(chatId, 'dig_durasi', { ...d, hrg: hrgD });
-    await tg.sendMessage(chatId, 'Masa aktifnya berapa hari? (contoh: 30 — ketik 0 bila tanpa batas)', MD);
-    return true;
-  }
-  if (step === 'dig_durasi') {
-    const durD = parseInt(input.replace(/[^0-9]/g, ''), 10) || 0;
-    await setAdminState(chatId, 'dig_garansi', { ...d, durasi: durD });
-    await tg.sendMessage(chatId, 'Garansinya berapa hari? (ketik 0 bila tanpa garansi)', MD);
-    return true;
-  }
-  if (step === 'dig_garansi') {
-    const garD = parseInt(input.replace(/[^0-9]/g, ''), 10) || 0;
-    await setAdminState(chatId, 'dig_template', { ...d, garansi: garD });
-    await tg.sendMessage(chatId, 'Terakhir — kirim template pengirimannya.\nPakai {ISI} untuk link/email dan {ISI2} untuk password.', MD);
-    return true;
-  }
-  if (step === 'dig_template') {
-    try {
-      await sbPost('products', [{
-        id: d.kode, nama: d.nama, kategori: 'Digital', deskripsi: '', harga: d.hrg || 0,
-        stok: 0, link_gambar: null, tipe: 'digital', template_kirim: input,
-        durasi_hari: d.durasi || 0, garansi_hari: d.garansi || 0,
-      }], 'resolution=merge-duplicates,return=minimal');
-      await clearAdminState(chatId);
-      await tg.sendMessage(chatId, `✅ Produk digital *${d.nama}* (\`${d.kode}\`) ditambahkan.\nStok masih 0 — ketik "tambah stok ${String(d.kode).toLowerCase()}" untuk isi stok.`, MD);
-    } catch (e) {
-      await tg.sendMessage(chatId, '❌ Gagal menyimpan produk: ' + e.message, MD);
-    }
-    return true;
-  }
-  // --- PRODUK DIGITAL: input stok ---
-  if (step === 'dig_stok') {
-    const entries = input.split('\n').map((s) => s.trim()).filter(Boolean)
-      .map((ln) => { const parts = ln.split('|').map((s) => s.trim()); return { isi: parts[0], isi2: parts[1] || '' }; })
-      .filter((e) => e.isi);
-    if (!entries.length) { await tg.sendMessage(chatId, '❌ Tidak ada stok terbaca. Kirim ulang, 1 baris = 1 item.', MD); return true; }
-    try {
-      const { added, dupes } = await digital.addStock(d.produk_id, entries);
-      const sisa = await digital.countStock(d.produk_id);
-      await clearAdminState(chatId);
-      await tg.sendMessage(chatId, `✅ ${added} stok ditambahkan${dupes ? ` (${dupes} duplikat dilewati)` : ''}.\nStok \`${d.produk_id}\` sekarang: *${sisa}*`, MD);
-    } catch (e) {
-      await tg.sendMessage(chatId, '❌ Gagal menyimpan stok: ' + e.message, MD);
-    }
-    return true;
-  }
-  // --- PRODUK DIGITAL: edit template ---
-  if (step === 'dig_template_edit') {
-    try {
-      await sbPatch('products', { id: `eq.${d.produk_id}` }, { template_kirim: input });
-      await clearAdminState(chatId);
-      await tg.sendMessage(chatId, `✅ Template \`${d.produk_id}\` diperbarui.`, MD);
-    } catch (e) {
-      await tg.sendMessage(chatId, '❌ Gagal memperbarui template: ' + e.message, MD);
     }
     return true;
   }
@@ -1852,42 +1644,7 @@ async function handleTemplateOrder(chatId, text) {
   // HANYA dari baris yang sama (baris kosong tidak boleh menyerap baris berikutnya)
   const ongkirMatch = text.match(/Ongkir:[ \t]*([^\n]*)/i);
   const ongkir = ongkirMatch ? (parseInt(String(ongkirMatch[1]).replace(/[^0-9]/g, ''), 10) || 0) : 0;
-  // --- PRODUK DIGITAL: deteksi & normalisasi dari katalog ---
-  let digItems = null; // [{product, qty}] bila order ini digital murni
-  {
-    const matches = [];
-    for (let i = 0; i < prod.length; i++) {
-      const m = await digital.matchDigital(prod[i][1].trim()).catch(() => ({ product: null }));
-      matches.push(m.product);
-    }
-    const jmlDigital = matches.filter(Boolean).length;
-    if (jmlDigital > 0 && jmlDigital < prod.length) {
-      await tg.sendMessage(chatId, '⚠️ Order campuran digital & fisik — pisahkan jadi 2 order ya (digital sendiri, fisik sendiri).', MD);
-      return;
-    }
-    if (prod.length > 0 && jmlDigital === prod.length) {
-      digItems = matches.map((p, i) => ({ product: p, qty: parseInt(qty[i][1], 10) || 0 }));
-      // pakai harga katalog digital (abaikan harga ketikan di form)
-      totalKeseluruhan = 0; detailStruk = '';
-      for (const di of digItems) {
-        const sub = di.qty * Number(di.product.harga || 0); totalKeseluruhan += sub;
-        detailStruk += `• ${di.product.nama} (${di.qty}x) = ${rp(sub)}\n`;
-      }
-      if (totalKeseluruhan <= 0) {
-        await tg.sendMessage(chatId, '❌ Harga produk digital masih 0 di katalog. Atur dulu harganya, baru buat order.', MD);
-        return;
-      }
-      for (const di of digItems) {
-        const adaStok = await digital.countStock(di.product.id).catch(() => 0);
-        if (adaStok < di.qty) {
-          await tg.sendMessage(chatId, `❌ Stok ${di.product.nama} tidak cukup (tersedia ${adaStok}, diminta ${di.qty}). QRIS tidak dibuat.`, MD);
-          return;
-        }
-      }
-    }
-  }
-  // Ongkir hanya untuk order fisik (produk digital terkirim via WA — tanpa ongkir)
-  const ongkirAktif = (!digItems && ongkir > 0) ? ongkir : 0;
+  const ongkirAktif = ongkir > 0 ? ongkir : 0;
   if (ongkirAktif) {
     totalKeseluruhan += ongkirAktif;
     detailStruk += `• Ongkir = ${rp(ongkirAktif)}\n`;
@@ -1905,9 +1662,8 @@ async function handleTemplateOrder(chatId, text) {
       let itemsOk = true;
       for (let i = 0; i < prod.length; i++) {
         const q = parseInt(qty[i][1], 10) || 0; const h = parseInt(String(hrg[i][1]).replace(/[^0-9]/g, ''), 10) || 0;
-        const diIt = digItems ? digItems[i] : null;
         try {
-          await sbPost('order_items', [{ order_id: idPesanan, product_id: diIt ? diIt.product.id : undefined, nama_produk: diIt ? diIt.product.nama : prod[i][1].trim(), qty: diIt ? diIt.qty : q, harga_satuan: diIt ? Number(diIt.product.harga || 0) : h }], 'return=minimal');
+          await sbPost('order_items', [{ order_id: idPesanan, nama_produk: prod[i][1].trim(), qty: q, harga_satuan: h }], 'return=minimal');
         } catch (e) { itemsOk = false; console.error('[order] item gagal:', e.message); }
       }
       if (itemsOk && ongkirAktif) {
@@ -1946,28 +1702,8 @@ async function handleTemplateOrder(chatId, text) {
           invoiceWaOk = await queueWA(nowa, 'document', publicUrl, `Invoice-${idPesanan}.pdf`);
         }
       } catch (e) { console.error('[bayar-toko] invoice gagal:', e.message); }
-      // Produk digital + bayar di toko = sudah lunas → kunci stok & kirim konten sekarang
-      let digTerkirim = false; let selesaiOk = true;
-      if (digItems) {
-        for (const di of digItems) await digital.lockStock(idPesanan, di.product.id, di.qty).catch(() => 0);
-        const terkirim = await digital.deliverLocked(idPesanan, nowa).catch(() => null);
-        if (terkirim) {
-          digTerkirim = true;
-          try { await sbPatch('orders', { id: `eq.${idPesanan}` }, { status: 'selesai' }); }
-          catch (e) { selesaiOk = false; console.error('[digital-toko] patch selesai gagal:', e.message); }
-          for (const t of terkirim) {
-            await queueWA(nowa, 'text', `✅ *PESANAN SELESAI (${idPesanan})*\n\nBerikut pesanan digital kakak:\n\n${t.message}`);
-          }
-        }
-      }
-      await logActivity('order', `Pesanan ${idPesanan} (bayar di toko): ${rp(totalKeseluruhan)}. Invoice ${invoiceWaOk ? 'dikirim' : 'GAGAL dikirim'}.${digItems ? (digTerkirim ? ' Konten digital terkirim.' : ' Konten digital GAGAL terkirim.') : ''}`);
-      await tg.sendMessage(chatId, digItems
-        ? (digTerkirim
-          ? (selesaiOk
-            ? `✅ Sukses! Order digital *${idPesanan}* SELESAI — akun/link sudah dikirim ke WA customer.`
-            : `⚠️ Konten digital *${idPesanan}* TERKIRIM ke WA customer, tapi status order GAGAL diubah ke selesai di database. Ubah manual via dashboard.`)
-          : `⚠️ Order *${idPesanan}* tersimpan, tapi pengiriman konten digital GAGAL. Cek stok digital.`)
-        : `✅ Sukses! Order *${idPesanan}* (bayar di toko). ${invoiceWaOk ? 'Invoice PDF dikirim ke WA customer.' : '⚠️ Invoice PDF GAGAL dikirim ke WA customer — kirim manual ya.'}`, MD);
+      await logActivity('order', `Pesanan ${idPesanan} (bayar di toko): ${rp(totalKeseluruhan)}. Invoice ${invoiceWaOk ? 'dikirim' : 'GAGAL dikirim'}.`);
+      await tg.sendMessage(chatId, `✅ Sukses! Order *${idPesanan}* (bayar di toko). ${invoiceWaOk ? 'Invoice PDF dikirim ke WA customer.' : '⚠️ Invoice PDF GAGAL dikirim ke WA customer — kirim manual ya.'}`, MD);
       return;
     }
     // Jika bayar QRIS: generate QRIS seperti biasa
@@ -1984,9 +1720,8 @@ async function handleTemplateOrder(chatId, text) {
     let itemsOkQ = true;
     for (let i = 0; i < prod.length; i++) {
       const q = parseInt(qty[i][1], 10) || 0; const h = parseInt(String(hrg[i][1]).replace(/[^0-9]/g, ''), 10) || 0;
-      const diIt = digItems ? digItems[i] : null;
       try {
-        await sbPost('order_items', [{ order_id: idPesanan, product_id: diIt ? diIt.product.id : undefined, nama_produk: diIt ? diIt.product.nama : prod[i][1].trim(), qty: diIt ? diIt.qty : q, harga_satuan: diIt ? Number(diIt.product.harga || 0) : h }], 'return=minimal');
+        await sbPost('order_items', [{ order_id: idPesanan, nama_produk: prod[i][1].trim(), qty: q, harga_satuan: h }], 'return=minimal');
       } catch (e) { itemsOkQ = false; console.error('[order] item gagal:', e.message); }
     }
     if (itemsOkQ && ongkirAktif) {
@@ -2000,25 +1735,11 @@ async function handleTemplateOrder(chatId, text) {
       await tg.sendMessage(chatId, `❌ Order *${idPesanan}* DIBATALKAN: rincian item gagal disimpan ke database. QRIS tidak dikirim ke customer. Coba lagi sebentar lagi.`, MD);
       return;
     }
-    // Produk digital: kunci stok utk order ini (konten dikirim panel begitu bayar terdeteksi)
-    if (digItems) {
-      let kunciOk = true;
-      for (const di of digItems) {
-        const nK = await digital.lockStock(idPesanan, di.product.id, di.qty).catch(() => 0);
-        if (!nK) kunciOk = false;
-      }
-      if (!kunciOk) {
-        await digital.releaseLock(idPesanan);
-        await sbPatch('orders', { id: `eq.${idPesanan}` }, { status: 'batal' }).catch(() => {});
-        await tg.sendMessage(chatId, `❌ Stok digital berubah saat order dibuat — order *${idPesanan}* dibatalkan & QRIS tidak dikirim. Cek stok lalu buat ulang.`, MD);
-        return;
-      }
-    }
     const qrisOk = await queueWA(nowa, 'image', qris.qr_image_url,
       `Halo kak *${namaPenerima}*!\nID: *${idPesanan}*\n\n${detailStruk}\n*TOTAL: ${rp(totalKeseluruhan)}*\n⏰ *QRIS aktif 10 menit saja* — kalau sudah lewat, jangan di-scan ya kak, minta QRIS baru ke admin.\nSilakan scan QRIS untuk membayar.`);
     await logActivity('order', `Pesanan baru ${idPesanan} (template admin): ${rp(totalKeseluruhan)}. QRIS ${qrisOk ? 'terkirim' : 'GAGAL dikirim'}.`);
     if (qrisOk) {
-      await tg.sendMessage(chatId, `✅ Sukses! QRIS terkirim untuk *${idPesanan}*.${digItems ? '\n📩 Produk digital: akun/link terkirim otomatis begitu pembayaran terdeteksi.' : ''}`, MD);
+      await tg.sendMessage(chatId, `✅ Sukses! QRIS terkirim untuk *${idPesanan}*.`, MD);
     } else {
       await tg.sendMessage(chatId, `⚠️ Order *${idPesanan}* tersimpan, tapi QRIS *gagal* dikirim ke WA. Cek koneksi database lalu kirim manual.`, MD);
     }

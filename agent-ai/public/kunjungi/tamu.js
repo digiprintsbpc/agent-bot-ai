@@ -43,7 +43,7 @@
   const overlay = $('pesanOverlay');
   const isi = $('pesanIsi');
   const btn = $('btnPesan');
-  let katalog = null; // { nota: Map<id, p>, perUkuran: Map<denom, Map<ply, Map<lembar, p>>>, rim: [], digital: [] }
+  let katalog = null; // { nota: Map<id, p>, perUkuran: Map<denom, Map<ply, Map<lembar, p>>>, rim: [] }
   let pil = { ukuran: null, ply: null, lembar: null };
   let produkAktif = null;
   let qty = 1;
@@ -72,7 +72,6 @@
       if (!d.ok) throw new Error(d.error || 'gagal');
       const perUkuran = new Map();
       const rim = [];
-      const digital = [];
       const notaRe = /^N(\d+)-(\d)P-(50|100)$/;
       for (const p of d.produk) {
         const m = String(p.id).match(notaRe);
@@ -81,10 +80,9 @@
           if (!perUkuran.has(den)) perUkuran.set(den, new Map());
           if (!perUkuran.get(den).has(ply)) perUkuran.get(den).set(ply, new Map());
           perUkuran.get(den).get(ply).set(lbr, p);
-        } else if (p.tipe === 'digital') digital.push(p);
-        else rim.push(p);
+        } else rim.push(p);
       }
-      katalog = { perUkuran, rim, digital };
+      katalog = { perUkuran, rim };
       renderBangun();
     } catch (e) {
       isi.innerHTML = `<div class="errBox">Katalog gagal dimuat. <a href="#" id="cobaLagi">Coba lagi</a></div>`;
@@ -140,16 +138,6 @@
       if (produkAktif && katalog.rim.some((p) => p.id === produkAktif.id) && !pNota) h += hargaBar(produkAktif);
     }
 
-    if (katalog.digital.length) {
-      h += `<div class="langkah">Produk digital <span>— terkirim otomatis ke WA setelah bayar</span></div><div class="chips">`;
-      for (const p of katalog.digital) {
-        const habis = !(p.stok > 0);
-        h += `<button type="button" class="chipP ${produkAktif && produkAktif.id === p.id ? 'on' : ''}" data-produk="${p.id}" ${habis ? 'disabled' : ''}>${esc(p.nama)}<small>${rp(p.harga)} · stok ${habis ? 'habis' : p.stok}</small></button>`;
-      }
-      h += `</div>`;
-      if (produkAktif && katalog.digital.some((p) => p.id === produkAktif.id)) h += hargaBar(produkAktif);
-    }
-
     h += renderCart();
     isi.innerHTML = h;
     bindBangun();
@@ -170,7 +158,7 @@
     }
     h += `<div class="fld"><label>Nama kamu</label><input id="fNama" autocomplete="name" placeholder="cth: Budi"></div>
       <div class="fld"><label>Nomor WhatsApp (aktif, untuk QRIS & invoice)</label><input id="fWa" inputmode="tel" autocomplete="tel" placeholder="cth: 081234567890"></div>
-      <div class="fld"><label>Alamat lengkap pengiriman</label><textarea id="fAlamat" rows="2" placeholder="Jalan, nomor rumah, kecamatan, kota — untuk produk digital boleh dikosongi"></textarea></div>
+      <div class="fld"><label>Alamat lengkap pengiriman</label><textarea id="fAlamat" rows="2" placeholder="Jalan, nomor rumah, kecamatan, kota"></textarea></div>
       <div id="errSlot"></div>
       <button type="button" class="btnUtama" id="btnCheckout">Buat Pesanan & Bayar · ${rp(total)}</button>
       <p style="color:var(--muted);font-size:12px;margin-top:8px">Menekan tombol ini akan membuat pesanan dan menampilkan QRIS. QRIS yang sama juga dikirim ke WA kamu.</p>`;
@@ -188,7 +176,7 @@
       pil.lembar = b.dataset.lembar; qty = 1; renderBangun();
     }));
     isi.querySelectorAll('[data-produk]').forEach((b) => b.addEventListener('click', () => {
-      const semua = [...katalog.rim, ...katalog.digital];
+      const semua = [...katalog.rim];
       produkAktif = semua.find((p) => p.id === b.dataset.produk) || null;
       pil = { ukuran: null, ply: null, lembar: null }; qty = 1; renderBangun();
     }));
