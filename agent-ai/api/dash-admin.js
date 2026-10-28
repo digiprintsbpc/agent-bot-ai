@@ -15,11 +15,28 @@
  * POST ?action=delete-product              → body: id
  * POST ?action=add-pengeluaran             → body: nominal, keterangan
  * POST ?action=delete-pengeluaran          → body: id
+ * GET  ?action=bahan-baku                  → daftar bahan baku
+ * GET  ?action=bahan-baku-config           → config HPP tersimpan (atau null)
+ * GET  ?action=compute-hpp                 → hitung HPP pakai config tersimpan
+ * POST ?action=save-bahan-baku             → body: id?, nama, isi_per_box, harga_per_box, keterangan
+ * POST ?action=delete-bahan-baku           → body: id
+ * POST ?action=save-bahan-baku-config      → body: margin_persen, biaya_print_per_lembar, keuntungan_rim, komposisi {1:[...],2:[...],3:[...]}
+ * POST ?action=compute-hpp                 → body opsional (override simulasi): margin_persen, biaya_print_per_lembar, keuntungan_rim, komposisi, ambang_persen
+ *
+ * MODUL BAHAN BAKU / HPP (FASE 2, rumus sheet "Offline" pemilik):
+ * modul ini TIDAK mengubah harga katalog. Ia hanya menghitung HPP +
+ * harga hitung pembanding (lib/hpp.js) dan membandingkannya dengan harga
+ * products. Harga katalog tetap diubah manual via tab Produk.
+ * Butuh tabel bahan_baku + bahan_baku_config
+ * (lihat sql-bahan-baku.sql — dijalankan pemilik di SQL Editor Supabase).
+ * Config: margin_persen (live 2%), biaya_print_per_lembar (Rp 300),
+ * keuntungan_rim (Rp 140.000), komposisi {1:[...],2:[...],3:[...]}.
  */
 
 const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SB_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const PIN = process.env.DASHBOARD_PIN || '1234';
+const hpp = require('../lib/hpp');
 
 const STATUS_OK = ['pending', 'diproses', 'dikirim', 'selesai', 'batal'];
 
@@ -67,6 +84,70 @@ async function sbDelete(table, match) {
   });
   if (!r.ok) throw new Error(`${table} delete: ${r.status}`);
   return r.json().catch(() => []);
+}
+
+/* ---------- modul bahan baku / HPP (rumus sheet "Offline") ---------- */
+async function loadBahan() {
+  try {
+    const rows = await sbGet('bahan_baku', { select: 'id,nama,isi_per_box,harga_per_box,harga_box_rim,keterangan', order: 'nama.asc', limit: 200 });
+    return { bahan: rows, belumMigrasi: false };
+  } catch (e) {
+    return { bahan: [], belumMigrasi: true };
+  }
+}
+
+async function loadConfigTersimpan() {
+  try {
+    const rows = await sbGet('bahan_baku_config', { select: 'id,margin_persen,biaya_print_per_lembar,keuntungan_rim,komposisi', id: 'eq.default', limit: 1 });
+    if (rows[0]) return { config: rows[0], belumMigrasi: false };
+  } catch (e) {
+    return { config: null, belumMigrasi: true };
+  }
+  return { config: null, belumMigrasi: false };
+}
+
+// Terima komposisi sebagai objek array ATAU string koma ("top-putih, middle").
+function parseKomposisiInput(k) {
+  if (!k || typeof k !== 'object') throw new Error('Komposisi harus objek {1:[...],2:[...],3:[...]}');
+  const out = {};
+  for (const ply of [1, 2, 3]) {
+    let v = k[ply] ?? k[String(ply)];
+    if (typeof v === 'string') v = v.split(',').map((s) => s.trim()).filter(Boolean);
+    if (!Array.isArray(v) || !v.length) throw new Error(`Komposisi ${ply}ply harus daftar ID bahan yang tidak kosong`);
+    out[ply] = v;
+  }
+  return out;
+}
+
+async function hitungHpp(overrides) {
+  const { bahan, belumMigrasi } = await loadBahan();
+  if (belumMigrasi) {
+    const err = new Error('Tabel bahan_baku belum ada — jalankan sql-bahan-baku.sql di Supabase dulu');
+    err.belumMigrasi = true;
+    throw err;
+  }
+  if (!bahan.length) throw new Error('Belum ada data bahan — isi dulu di tab Bahan Baku atau jalankan SQL seed');
+  const tersimpan = await loadConfigTersimpan();
+  const config = {
+    margin_persen: overrides?.margin_persen ?? tersimpan.config?.margin_persen ?? hpp.DEFAULT_CONFIG.margin_persen,
+    biaya_print_per_lembar: overrides?.biaya_print_per_lembar ?? tersimpan.config?.biaya_print_per_lembar ?? hpp.DEFAULT_CONFIG.biaya_print_per_lembar,
+    keuntungan_rim: overrides?.keuntungan_rim ?? tersimpan.config?.keuntungan_rim ?? hpp.DEFAULT_CONFIG.keuntungan_rim,
+    komposisi: overrides?.komposisi || tersimpan.config?.komposisi || hpp.DEFAULT_CONFIG.komposisi,
+  };
+  const prods = await sbGet('products', { select: 'id,harga', limit: 200 });
+  const katalog = {};
+  for (const p of prods) katalog[p.id] = Number(p.harga || 0);
+  const ambang = overrides?.ambang_persen;
+  const tabel = hpp.computeTabel({ bahan, config, katalog, ambangPersen: ambang });
+  const rim = hpp.computeRim({ bahan, config, katalog, ambangPersen: ambang });
+  return {
+    config: tabel.config,
+    config_dari_default: !tersimpan.config,
+    ambang_persen: tabel.ambang_persen,
+    rows: tabel.rows,
+    rim,
+    asumsi: hpp.ASUMSI,
+  };
 }
 
 function body(req) {
@@ -150,6 +231,26 @@ module.exports = async (req, res) => {
         keluarHari: sumK(keluar.filter((o) => o.tanggal >= hariIni)),
         keluarBulan: sumK(keluar),
       });
+    }
+
+    if (method === 'GET' && action === 'bahan-baku') {
+      const { bahan, belumMigrasi } = await loadBahan();
+      return res.status(200).json({ ok: true, bahan, belumMigrasi });
+    }
+
+    if (method === 'GET' && action === 'bahan-baku-config') {
+      const tersimpan = await loadConfigTersimpan();
+      if (tersimpan.belumMigrasi) return res.status(200).json({ ok: true, config: null, belumMigrasi: true });
+      return res.status(200).json({ ok: true, config: tersimpan.config, dariDefault: !tersimpan.config });
+    }
+
+    if (method === 'GET' && action === 'compute-hpp') {
+      try {
+        const hasil = await hitungHpp(null);
+        return res.status(200).json({ ok: true, ...hasil });
+      } catch (e) {
+        return res.status(200).json({ ok: false, error: e.message, belumMigrasi: !!e.belumMigrasi });
+      }
     }
 
     // ---------- POST ----------
@@ -331,6 +432,87 @@ module.exports = async (req, res) => {
       if (action === 'delete-pengeluaran') {
         await sbDelete('pengeluaran', { id: `eq.${String(b.id || '')}` });
         return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'save-bahan-baku') {
+        const nama = String(b.nama || '').trim();
+        const isi = parseInt(b.isi_per_box, 10);
+        const harga = Number(b.harga_per_box);
+        if (!nama) return res.status(400).json({ ok: false, error: 'Nama bahan wajib diisi' });
+        if (!Number.isInteger(isi) || isi <= 0) return res.status(400).json({ ok: false, error: 'Isi per box harus bilangan bulat > 0' });
+        if (!Number.isFinite(harga) || harga < 0) return res.status(400).json({ ok: false, error: 'Harga per box tidak valid' });
+        // harga_box_rim opsional (untuk paket rim offline); kosong = null.
+        let hargaRim = null;
+        if (b.harga_box_rim !== undefined && b.harga_box_rim !== '' && b.harga_box_rim !== null) {
+          hargaRim = Number(b.harga_box_rim);
+          if (!Number.isFinite(hargaRim) || hargaRim < 0) return res.status(400).json({ ok: false, error: 'Harga box rim tidak valid' });
+        }
+        const keterangan = String(b.keterangan || '');
+        const id = String(b.id || '').trim();
+        const row = { nama, isi_per_box: isi, harga_per_box: harga, harga_box_rim: hargaRim, keterangan };
+        if (id) {
+          const upd = await sbPatch('bahan_baku', { id: `eq.${id}` }, row);
+          if (upd.length) return res.status(200).json({ ok: true, id });
+          const created = await sbPost('bahan_baku', [{ id, ...row }]);
+          return res.status(200).json({ ok: true, id: created[0]?.id || id });
+        }
+        const slug = nama.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'bahan';
+        try {
+          const created = await sbPost('bahan_baku', [{ id: slug, ...row }]);
+          return res.status(200).json({ ok: true, id: created[0]?.id || slug });
+        } catch (e) {
+          return res.status(400).json({ ok: false, error: `ID "${slug}" sudah ada — ubah nama bahan atau isi ID lain` });
+        }
+      }
+
+      if (action === 'delete-bahan-baku') {
+        const id = String(b.id || '');
+        const del = await sbDelete('bahan_baku', { id: `eq.${id}` });
+        if (!del.length) return res.status(404).json({ ok: false, error: `Bahan ${id} tidak ditemukan — tidak ada yang terhapus.` });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'save-bahan-baku-config') {
+        const margin = Number(b.margin_persen);
+        const print = Number(b.biaya_print_per_lembar);
+        const untungRim = Number(b.keuntungan_rim);
+        if (!Number.isFinite(margin) || margin < 0) return res.status(400).json({ ok: false, error: 'Margin % tidak valid' });
+        if (!Number.isFinite(print) || print < 0) return res.status(400).json({ ok: false, error: 'Biaya print per lembar tidak valid' });
+        if (!Number.isFinite(untungRim) || untungRim < 0) return res.status(400).json({ ok: false, error: 'Keuntungan rim tidak valid' });
+        let komposisi;
+        try { komposisi = parseKomposisiInput(b.komposisi); } catch (e) { return res.status(400).json({ ok: false, error: e.message }); }
+        try {
+          const { bahan } = await loadBahan();
+          const ids = new Set(bahan.map((x) => x.id));
+          for (const ply of [1, 2, 3]) for (const bid of komposisi[ply]) {
+            if (!ids.has(bid)) return res.status(400).json({ ok: false, error: `Bahan "${bid}" di komposisi ${ply}ply tidak ada di daftar bahan` });
+          }
+        } catch (e) { return res.status(400).json({ ok: false, error: e.message }); }
+        const row = { id: 'default', margin_persen: margin, biaya_print_per_lembar: print, keuntungan_rim: untungRim, komposisi };
+        const upd = await sbPatch('bahan_baku_config', { id: 'eq.default' }, row);
+        if (upd.length) return res.status(200).json({ ok: true });
+        await sbPost('bahan_baku_config', [row]);
+        return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'compute-hpp') {
+        let overrides = null;
+        if (b && (b.margin_persen !== undefined || b.biaya_print_per_lembar !== undefined || b.keuntungan_rim !== undefined || b.komposisi !== undefined || b.ambang_persen !== undefined)) {
+          overrides = {};
+          if (b.margin_persen !== undefined && b.margin_persen !== '') overrides.margin_persen = Number(b.margin_persen);
+          if (b.biaya_print_per_lembar !== undefined && b.biaya_print_per_lembar !== '') overrides.biaya_print_per_lembar = Number(b.biaya_print_per_lembar);
+          if (b.keuntungan_rim !== undefined && b.keuntungan_rim !== '') overrides.keuntungan_rim = Number(b.keuntungan_rim);
+          if (b.komposisi !== undefined) {
+            try { overrides.komposisi = parseKomposisiInput(b.komposisi); } catch (e) { return res.status(400).json({ ok: false, error: e.message }); }
+          }
+          if (b.ambang_persen !== undefined && b.ambang_persen !== '') overrides.ambang_persen = Number(b.ambang_persen);
+        }
+        try {
+          const hasil = await hitungHpp(overrides);
+          return res.status(200).json({ ok: true, ...hasil });
+        } catch (e) {
+          return res.status(200).json({ ok: false, error: e.message, belumMigrasi: !!e.belumMigrasi });
+        }
       }
 
       return res.status(400).json({ ok: false, error: 'Aksi tidak dikenal' });

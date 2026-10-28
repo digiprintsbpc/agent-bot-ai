@@ -54,6 +54,7 @@
         <button class="tab-btn" data-tab="orders">📋 Kelola Order</button>
         <button class="tab-btn" data-tab="produk">📦 Produk</button>
         <button class="tab-btn" data-tab="keuangan">💸 Keuangan</button>
+        <button class="tab-btn" data-tab="bahan">📄 Bahan Baku</button>
       </nav>
     </div>
   </div>
@@ -191,6 +192,72 @@
         </tr></thead><tbody id="kgRows"></tbody></table>
       </div>
     </section>
+
+    <!-- ============ TAB 6: BAHAN BAKU / HPP ============ -->
+    <section id="tab-bahan" class="hidden">
+      <div id="bbMigration" class="card mb-3 hidden">
+        <p class="text-sm text-red-700">⚠️ Tabel bahan baku belum ada. Jalankan <b>sql-bahan-baku.sql</b> di SQL Editor Supabase (project toko), lalu buka lagi tab ini.</p>
+      </div>
+      <div class="card mb-3 overflow-x-auto">
+        <h2 class="font-semibold mb-2">📄 Daftar Bahan Kertas</h2>
+        <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+          <th class="py-2 pr-2">Bahan</th><th class="pr-2">Isi/box</th><th class="pr-2">Harga/box</th><th class="pr-2">Harga/lembar</th><th class="pr-2">Harga box rim</th><th>Aksi</th>
+        </tr></thead><tbody id="bbRows"></tbody></table>
+      </div>
+      <div class="card mb-3">
+        <h2 class="font-semibold mb-2">➕ Tambah / Ubah Bahan</h2>
+        <input type="hidden" id="bbId">
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-2 mb-2">
+          <input id="bbNama" class="inp text-sm" placeholder="Nama bahan">
+          <input id="bbIsi" type="number" class="inp text-sm" placeholder="Isi per box">
+          <input id="bbHarga" type="number" class="inp text-sm" placeholder="Harga per box (Rp)">
+          <input id="bbHargaRim" type="number" class="inp text-sm" placeholder="Harga box rim (Rp, opsional)">
+          <input id="bbKet" class="inp text-sm" placeholder="Keterangan">
+        </div>
+        <div class="flex gap-2">
+          <button id="bbSave" class="btn-primary !py-2 text-sm">Simpan Bahan</button>
+          <button id="bbCancel" class="btn-danger !py-2 !text-sm hidden">Batal Ubah</button>
+        </div>
+        <p class="text-xs text-slate-500 mt-2">ID bahan dibuat otomatis dari nama (huruf kecil, strip). Harga/lembar = harga per box ÷ isi per box.</p>
+      </div>
+      <div class="card mb-3">
+        <h2 class="font-semibold mb-2">⚙️ Config HPP</h2>
+        <div class="grid grid-cols-3 gap-2 mb-2">
+          <div><label class="text-xs text-slate-500">Margin (%) — live 2%</label><input id="cfgMargin" type="number" step="0.1" class="inp text-sm"></div>
+          <div><label class="text-xs text-slate-500">Biaya print / lembar (Rp)</label><input id="cfgPrint" type="number" class="inp text-sm"></div>
+          <div><label class="text-xs text-slate-500">Keuntungan rim (Rp)</label><input id="cfgUntungRim" type="number" class="inp text-sm"></div>
+        </div>
+        <div class="grid grid-cols-3 gap-2 mb-2">
+          <div><label class="text-xs text-slate-500">Komposisi 1ply (ID, koma)</label><input id="cfgKomp1" class="inp text-sm" placeholder="hvs-60gsm"></div>
+          <div><label class="text-xs text-slate-500">Komposisi 2ply</label><input id="cfgKomp2" class="inp text-sm" placeholder="top-putih, buttom"></div>
+          <div><label class="text-xs text-slate-500">Komposisi 3ply</label><input id="cfgKomp3" class="inp text-sm" placeholder="top-putih, middle, buttom"></div>
+        </div>
+        <p class="text-xs text-slate-500 mb-2">Komposisi diisi ID bahan dari daftar di atas, pisah koma. Komposisi rim tidak bisa diubah dari sini (default sheet, lihat catatan asumsi).</p>
+        <button id="cfgSave" class="btn-primary !py-2 text-sm">Simpan Config</button>
+        <p id="cfgNote" class="text-xs text-slate-500 mt-2"></p>
+      </div>
+      <div class="card mb-3">
+        <h2 class="font-semibold mb-2">🧮 Hitung HPP &amp; Bandingkan Katalog</h2>
+        <div class="flex gap-2 items-center mb-2">
+          <label class="text-xs text-slate-500">Ambang flag selisih (%)</label>
+          <input id="hppAmbang" type="number" value="10" class="inp !w-20 !py-1 text-sm">
+          <button id="hppHitung" class="btn-primary !py-2 text-sm">Hitung</button>
+        </div>
+        <p class="text-xs text-slate-500 mb-3">Hitung memakai nilai form config di atas (simulasi — belum tersimpan sampai tekan Simpan Config). Modul ini TIDAK mengubah harga katalog.</p>
+        <div class="overflow-x-auto mb-4">
+          <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+            <th class="py-2 pr-2">Ukuran</th><th class="pr-2">Ply</th><th class="pr-2">Qty</th><th class="pr-2">Produk</th><th class="pr-2">HPP/buku</th><th class="pr-2">Harga 1 folio</th><th class="pr-2">Harga hitung</th><th class="pr-2">Harga katalog</th><th class="pr-2">Selisih</th><th>Flag</th>
+          </tr></thead><tbody id="hppRows"></tbody></table>
+        </div>
+        <h3 class="font-semibold mb-2">📦 Paket Rim Offline (free ongkir Malang)</h3>
+        <div class="overflow-x-auto mb-3">
+          <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+            <th class="py-2 pr-2">Ply</th><th class="pr-2">Produk</th><th class="pr-2">Bahan rim</th><th class="pr-2">+ Keuntungan</th><th class="pr-2">Harga hitung</th><th class="pr-2">Harga katalog</th><th class="pr-2">Selisih</th><th>Flag</th>
+          </tr></thead><tbody id="rimRows"></tbody></table>
+        </div>
+        <div id="hppAsumsi" class="text-xs text-slate-500 bg-slate-50 rounded-lg p-3"></div>
+      </div>
+    </section>
   </div>
 </div>
 
@@ -224,7 +291,7 @@ function showLogin(bad) {
 document.getElementById('logoutBtn').onclick = () => { sessionStorage.removeItem('dash_pin'); PIN=''; showLogin(false); };
 
 /* ---------- tabs ---------- */
-const TABS = ['dash','order-baru','orders','produk','keuangan'];
+const TABS = ['dash','order-baru','orders','produk','keuangan','bahan'];
 document.querySelectorAll('#tabs .tab-btn').forEach(b => b.onclick = () => {
   document.querySelectorAll('#tabs .tab-btn').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
@@ -233,6 +300,7 @@ document.querySelectorAll('#tabs .tab-btn').forEach(b => b.onclick = () => {
   if (b.dataset.tab === 'orders') loadOrders();
   if (b.dataset.tab === 'produk') loadProduk();
   if (b.dataset.tab === 'keuangan') loadKeuangan();
+  if (b.dataset.tab === 'bahan') loadBahanTab();
   window.scrollTo(0, 0);
 });
 function showTab(key) {
@@ -546,6 +614,169 @@ async function kgDel(id) {
   const d = await r.json();
   if (!d.ok) return alert('❌ ' + d.error);
   loadKeuangan();
+}
+
+/* ---------- TAB 6: bahan baku / HPP ---------- */
+let BB_ALL = [];
+
+async function loadBahanTab() {
+  const rb = await api('/api/dash-admin?action=bahan-baku');
+  const db = await rb.json();
+  if (db.belumMigrasi) {
+    document.getElementById('bbMigration').classList.remove('hidden');
+    document.getElementById('bbRows').innerHTML = '';
+    return;
+  }
+  document.getElementById('bbMigration').classList.add('hidden');
+  BB_ALL = db.bahan || [];
+  document.getElementById('bbRows').innerHTML = BB_ALL.map(b => `
+    <tr class="border-b last:border-0">
+      <td class="py-2 pr-2">${esc(b.nama)}<br><span class="text-xs text-slate-400 font-mono">${esc(b.id)}</span></td>
+      <td class="pr-2">${b.isi_per_box}</td>
+      <td class="pr-2">${rp(b.harga_per_box)}</td>
+      <td class="pr-2">${rp(Math.round((Number(b.harga_per_box) / Number(b.isi_per_box)) * 100) / 100)}</td>
+      <td class="pr-2">${b.harga_box_rim === null || b.harga_box_rim === undefined ? '-' : rp(b.harga_box_rim)}</td>
+      <td class="whitespace-nowrap">
+        <button class="text-indigo-600 text-xs font-semibold mr-2" onclick="bbEdit('${esc(b.id)}')">Ubah</button>
+        <button class="btn-danger" onclick="bbDel('${esc(b.id)}')">Hapus</button>
+      </td></tr>`).join('')
+    || '<tr><td colspan="6" class="py-3 text-center text-slate-400">Belum ada bahan</td></tr>';
+  const rc = await api('/api/dash-admin?action=bahan-baku-config');
+  const dc = await rc.json();
+  if (dc.belumMigrasi) return;
+  const cfg = dc.config || { margin_persen: 2, biaya_print_per_lembar: 300, keuntungan_rim: 140000, komposisi: { 1: ['hvs-60gsm'], 2: ['top-putih', 'buttom'], 3: ['top-putih', 'middle', 'buttom'] } };
+  document.getElementById('cfgMargin').value = cfg.margin_persen;
+  document.getElementById('cfgPrint').value = cfg.biaya_print_per_lembar;
+  document.getElementById('cfgUntungRim').value = cfg.keuntungan_rim;
+  const komp = cfg.komposisi || {};
+  document.getElementById('cfgKomp1').value = (komp[1] || komp['1'] || []).join(', ');
+  document.getElementById('cfgKomp2').value = (komp[2] || komp['2'] || []).join(', ');
+  document.getElementById('cfgKomp3').value = (komp[3] || komp['3'] || []).join(', ');
+  document.getElementById('cfgNote').textContent = dc.config
+    ? 'Config tersimpan dari database.'
+    : 'Belum ada config tersimpan — form menampilkan default (margin 2%, print Rp 300, untung rim Rp 140.000).';
+}
+
+function bbEdit(id) {
+  const b = BB_ALL.find(x => x.id === id);
+  if (!b) return;
+  document.getElementById('bbId').value = b.id;
+  document.getElementById('bbNama').value = b.nama;
+  document.getElementById('bbIsi').value = b.isi_per_box;
+  document.getElementById('bbHarga').value = b.harga_per_box;
+  document.getElementById('bbHargaRim').value = (b.harga_box_rim === null || b.harga_box_rim === undefined) ? '' : b.harga_box_rim;
+  document.getElementById('bbKet').value = b.keterangan || '';
+  document.getElementById('bbCancel').classList.remove('hidden');
+  document.getElementById('bbSave').textContent = 'Simpan Perubahan';
+}
+function bbClearForm() {
+  document.getElementById('bbId').value = '';
+  document.getElementById('bbNama').value = '';
+  document.getElementById('bbIsi').value = '';
+  document.getElementById('bbHarga').value = '';
+  document.getElementById('bbHargaRim').value = '';
+  document.getElementById('bbKet').value = '';
+  document.getElementById('bbCancel').classList.add('hidden');
+  document.getElementById('bbSave').textContent = 'Simpan Bahan';
+}
+document.getElementById('bbCancel').onclick = bbClearForm;
+document.getElementById('bbSave').onclick = async () => {
+  const payload = {
+    id: document.getElementById('bbId').value.trim() || undefined,
+    nama: document.getElementById('bbNama').value.trim(),
+    isi_per_box: document.getElementById('bbIsi').value,
+    harga_per_box: document.getElementById('bbHarga').value,
+    harga_box_rim: document.getElementById('bbHargaRim').value,
+    keterangan: document.getElementById('bbKet').value.trim(),
+  };
+  if (!payload.nama) return alert('Nama bahan wajib diisi');
+  const r = await api('/api/dash-admin?action=save-bahan-baku', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  bbClearForm();
+  loadBahanTab();
+};
+async function bbDel(id) {
+  if (!confirm(`Hapus bahan "${id}"? (Pastikan tidak dipakai komposisi)`)) return;
+  const r = await api('/api/dash-admin?action=delete-bahan-baku', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  loadBahanTab();
+}
+function cfgKomposisi() {
+  const pecah = (v) => v.split(',').map(s => s.trim()).filter(Boolean);
+  return {
+    1: pecah(document.getElementById('cfgKomp1').value),
+    2: pecah(document.getElementById('cfgKomp2').value),
+    3: pecah(document.getElementById('cfgKomp3').value),
+  };
+}
+document.getElementById('cfgSave').onclick = async () => {
+  const payload = {
+    margin_persen: document.getElementById('cfgMargin').value,
+    biaya_print_per_lembar: document.getElementById('cfgPrint').value,
+    keuntungan_rim: document.getElementById('cfgUntungRim').value,
+    komposisi: cfgKomposisi(),
+  };
+  const r = await api('/api/dash-admin?action=save-bahan-baku-config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  alert('✅ Config tersimpan');
+  hitungHpp();
+};
+document.getElementById('hppHitung').onclick = hitungHpp;
+async function hitungHpp() {
+  const payload = {
+    margin_persen: document.getElementById('cfgMargin').value,
+    biaya_print_per_lembar: document.getElementById('cfgPrint').value,
+    keuntungan_rim: document.getElementById('cfgUntungRim').value,
+    komposisi: cfgKomposisi(),
+    ambang_persen: document.getElementById('hppAmbang').value,
+  };
+  const r = await api('/api/dash-admin?action=compute-hpp', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const d = await r.json();
+  if (!d.ok) {
+    if (d.belumMigrasi) document.getElementById('bbMigration').classList.remove('hidden');
+    return alert('❌ ' + d.error);
+  }
+  const flagBadge = (f) => f === 'ok'
+    ? '<span class="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-800">OK</span>'
+    : f === 'selisih-besar'
+      ? '<span class="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-800">Selisih &gt; ambang</span>'
+      : '<span class="text-xs px-2 py-0.5 rounded-full bg-slate-200 text-slate-600">Tanpa katalog</span>';
+  const selisihTxt = (s, p) => (s === null ? '-' : (s > 0 ? '+' : '') + rp(s) + ` (${p}%)`);
+  document.getElementById('hppRows').innerHTML = d.rows.map(x => `
+    <tr class="border-b last:border-0">
+      <td class="py-2 pr-2">${x.fraksi_label === '1' ? '1 folio' : x.fraksi_label + ' folio'}</td>
+      <td class="pr-2">${x.ply}ply</td>
+      <td class="pr-2">${x.qty}</td>
+      <td class="pr-2 font-mono text-xs">${x.produk_id}</td>
+      <td class="pr-2">${rp(x.hpp_buku)}</td>
+      <td class="pr-2">${rp(x.harga_satu_folio)}</td>
+      <td class="pr-2 font-semibold">${rp(x.harga_hitung)}</td>
+      <td class="pr-2">${x.harga_katalog === null ? '-' : rp(x.harga_katalog)}</td>
+      <td class="pr-2">${selisihTxt(x.selisih, x.selisih_persen)}</td>
+      <td class="whitespace-nowrap">${flagBadge(x.flag)}${x.quirk_margin_ganda ? ' <span class="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800" title="Rumus sheet: margin diterapkan 2x untuk 100-lembar 1ply/2ply">Quirk: margin 2×</span>' : ''}</td>
+    </tr>`).join('');
+  document.getElementById('rimRows').innerHTML = d.rim.map(x => `
+    <tr class="border-b last:border-0">
+      <td class="py-2 pr-2">${x.ply}ply</td>
+      <td class="pr-2 font-mono text-xs">${x.produk_id}</td>
+      <td class="pr-2">${rp(x.bahan_rim)}</td>
+      <td class="pr-2">${rp(x.keuntungan_rim)}</td>
+      <td class="pr-2 font-semibold">${rp(x.harga_hitung)}</td>
+      <td class="pr-2">${x.harga_katalog === null ? '-' : rp(x.harga_katalog)}</td>
+      <td class="pr-2">${selisihTxt(x.selisih, x.selisih_persen)}</td>
+      <td>${flagBadge(x.flag)}</td>
+    </tr>`).join('');
+  document.getElementById('hppAsumsi').innerHTML = '<b>Catatan asumsi &amp; rumus:</b><ul class="list-disc ml-4 mt-1">' +
+    (d.asumsi || []).map(a => `<li>${esc(a)}</li>`).join('') +
+    '<li>Harga katalog TIDAK diubah oleh modul ini.</li></ul>' +
+    `<p class="mt-2">Config aktif: margin ${d.config.margin_persen}%, print Rp ${Number(d.config.biaya_print_per_lembar).toLocaleString('id-ID')}/lembar, untung rim Rp ${Number(d.config.keuntungan_rim).toLocaleString('id-ID')}, ambang ${d.ambang_persen}%.</p>`;
 }
 
 /* ---------- boot ---------- */
