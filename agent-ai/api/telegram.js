@@ -15,6 +15,7 @@ const toko = require('../lib/toko');
 const security = require('../lib/security');
 const customer = require('../lib/customer');
 const admin = require('../lib/admin');
+const penerjemah = require('../lib/penerjemah');
 
 const GREETING_RE = /^(halo+|hallo+|hai+|hello+|hi+|pagi+|siang+|sore+|malam+|assalamu\s*alaikum|tes|test)(\s+k[ak]+)?[!?.\s]*$/i;
 const GREETINGS = [
@@ -199,6 +200,22 @@ module.exports = async (req, res) => {
     const otext = String(msg.text || msg.caption || '');
     if (!otext) return res.status(200).send('ok');
     await memory.saveMessage(userId, 'user', otext);
+
+    // 1b) Lapisan penerjemah (owner saja): maksud -> perintah terstruktur ->
+    // query deterministik dari database. Kontrak sama seperti admin:
+    // string = kirim sebagai balasan; true = sudah terkirim di dalam;
+    // null = tidak di-handle -> lanjut ke handleText.
+    let trReply = null;
+    try { trReply = await penerjemah.handleTranslator(userId, otext, msg); }
+    catch (e) { console.error('[penerjemah] error:', e.message); }
+    if (trReply !== null && trReply !== undefined) {
+      if (typeof trReply === 'string' && trReply) {
+        await memory.saveMessage(userId, 'assistant', trReply).catch(() => {});
+        await sendMessage(userId, trReply).catch((e) => console.error('[send] gagal:', e.message));
+      }
+      return res.status(200).send('ok');
+    }
+
     let reply;
     try {
       reply = await handleText(userId, otext);

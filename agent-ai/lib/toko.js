@@ -18,7 +18,7 @@ Tabel dan kolom yang tersedia:
 - products(id, nama, kategori, deskripsi, harga, stok, link_gambar)
 - customers(id, nama, nomor_wa, provinsi, kota_kabupaten, kecamatan, desa_kelurahan, patokan, kode_pos, alamat_lengkap)
 - order_summary(id, tanggal, nama_penerima, nomor_wa, nomor_resi, status, total_harga, jumlah_item, ringkasan_produk)
-- order_items(order_id, product_id, nama_produk, qty, harga_satuan) — isi barang per order; filter order_id "eq.INV-xxxxxx"
+- order_items(order_id, product_id, nama_produk, qty) — isi barang per order; filter order_id "eq.INV-xxxxxx"
 - pengeluaran(id, keterangan, nominal, tanggal) — biaya operasional toko.
 
 Tugas: baca pertanyaan user (Bahasa Indonesia), keluarkan SATU objek JSON saja:
@@ -101,27 +101,37 @@ async function jawabInvoice(invId) {
     filter: { id: `eq.${invId}` }, limit: 1,
   });
   if (!orders.length) {
-    return `Invoice ${invId} tidak ditemukan di database. Pastikan nomornya benar ya.`;
+    return `Invoice \`${invId}\` tidak ditemukan di database. Pastikan nomornya benar ya.`;
   }
   const o = orders[0];
   const items = await sbQuery({
     table: 'order_items',
-    select: 'nama_produk,qty,harga_satuan',
+    // Skema nyata: hanya product_id, nama_produk, qty (tidak ada harga).
+    select: 'nama_produk,qty',
     filter: { order_id: `eq.${invId}` }, limit: 50,
   }).catch(() => []);
   const tgl = o.tanggal
     ? new Date(o.tanggal).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
     : '-';
-  let teks = `🧾 *Invoice ${o.id}*\n` +
+  // Template LENGKAP (fase 1): semua field baris order + backtick untuk
+  // ID/resi/WA agar sekali ketuk langsung tersalin di Telegram.
+  let teks = `🧾 *Invoice \`${o.id}\`*\n` +
     `- Nama: ${o.nama_penerima || '-'}\n` +
+    `- Nomor WA: ${o.nomor_wa ? `\`${o.nomor_wa}\`` : '-'}\n` +
+    `- Alamat: ${o.alamat_lengkap || '-'}\n` +
     `- Tanggal: ${tgl} WIB\n` +
     `- Status: ${o.status}\n` +
-    `- Resi: ${o.nomor_resi || 'belum ada'}\n`;
+    `- Resi: ${o.nomor_resi ? `\`${o.nomor_resi}\`` : 'belum ada'}\n`;
   if (items.length) {
     const totalQty = items.reduce((a, i) => a + Number(i.qty || 0), 0);
-    teks += `\nIsi pesanan (${totalQty} unit):\n` + items.map((i, idx) =>
-      `${idx + 1}. ${i.nama_produk} ×${i.qty} @ ${rp(i.harga_satuan)} = ${rp(Number(i.qty || 0) * Number(i.harga_satuan || 0))}`
-    ).join('\n') + '\n';
+    teks += `\nIsi pesanan (${totalQty} unit):\n` + items.map((i, idx) => {
+      // order_items di skema nyata tidak punya kolom harga — tampilkan harga
+      // hanya bila kolom itu benar-benar ada, jangan karang angka.
+      const harga = i.harga_satuan != null && i.harga_satuan !== ''
+        ? ` @ ${rp(i.harga_satuan)} = ${rp(Number(i.qty || 0) * Number(i.harga_satuan || 0))}`
+        : '';
+      return `${idx + 1}. ${i.nama_produk} ×${i.qty}${harga}`;
+    }).join('\n') + '\n';
   } else {
     teks += '\nIsi pesanan: (tidak ada rincian item)\n';
   }
