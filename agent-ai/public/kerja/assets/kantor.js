@@ -2209,7 +2209,202 @@ function apply(d) {
     drawHistBoard(d.runs);
   }
   renderUi(d, fresh);
+  // ANIMASI STATUS ORDER (admin saja): satu blok terpisah, tidak mengubah alur di atas.
+  applyStatusCounts(d.orderCounts);
   firstLoad = false;
+}
+
+// ---------------------------------------------------------------- ANIMASI STATUS ORDER (admin saja)
+// Digunakan HANYA bila !TAMU dan respons membawa d.orderCounts (angka saja,
+// tanpa nama/nominal/ID). Maksimal 4 objek animasi total: 2 figur + 2 mobil.
+// Posisi dipetik dari layout yang sudah ada di scene (tanpa merombak ruangan):
+//  - pintu utama di dinding kiri: PLACES.door = (ROOM.x0 - 0.9, CORRIDOR_Z)
+//    = (-10.9, -2.1); koridor z = -2.1 membentang melintasi ruangan.
+//  - packing: lorong meja cadangan B1 (gap x = -5.6, baris kursi z = 0.95),
+//    berdiri menghadap meja (heading PI), goyang kecil di tempat.
+//  - pengunjung: masuk lewat pintu -> koridor -> lorong x = -8.6 (gap meja B0)
+//    lalu berdiri di (-8.6, 0.9) menghadap area depan (+z).
+//  - mobil: tidak ada lahan parkir/luar di scene, jadi kedua mobil memakai
+//    lajur lurus di dalam ruangan dekat pintu: mobil kirim di z = -1.65
+//    (strip kosong antara koridor -2.1 dan tepi meja cadangan -1.225),
+//    mobil sampai di z = -2.55 (strip kosong antara koridor dan meja tim),
+//    x dari -9.2 (dekat pintu) sampai -3.8.
+// Figur status memakai kind 'status' + work = true supaya tidak dibajak
+// lounge() (hanya aktor non-freelancer tanpa work yang di-lounge-kan) dan
+// tidak ikut pembersihan freelancer di apply() (hanya kind 'freelancer').
+// Label nama disembunyikan dan mesh-nya dikeluarkan dari pickables supaya
+// figur ini tidak bisa diklik/difokus dan tidak menampilkan teks apa pun.
+const ORDER_ANIM = {
+  packing: null, visitor: null, visitorWp: 0, visitorWalking: false,
+  carKirim: null, carSampai: null,
+};
+const STATUS_PACKING = { x: -5.6, z: 0.95, heading: Math.PI };
+const STATUS_VISITOR_WPS = [V(-9.4, CORRIDOR_Z), V(-8.6, CORRIDOR_Z), V(-8.6, 0.9)];
+const STATUS_VISITOR_END = { x: -8.6, z: 0.9, heading: 0 };
+const STATUS_CAR_X0 = -9.2, STATUS_CAR_X1 = -3.8, STATUS_CAR_PARK_X = -4.6;
+
+function statusActor(key, color) {
+  const a = makeActor({
+    key, kind: 'status', name: '', role: '', color,
+    look: freelancerLook(key, color), desk: null,
+  });
+  a.work = true; // cegah lounge(): aktor status diatur manual, bukan santai acak
+  a.goal = null;
+  a.bubble = { text: '', until: 0 };
+  a.el.style.display = 'none'; // tanpa teks nama di atas figur
+  a.label.visible = false;
+  // Keluarkan dari pickables supaya tidak bisa diklik (tanpa popup/fokus).
+  a.p.root.traverse((o) => {
+    if (!o.isMesh) return;
+    o.userData.key = null;
+    const i = pickables.indexOf(o);
+    if (i >= 0) pickables.splice(i, 1);
+  });
+  return a;
+}
+function makeStatusCar(color) {
+  const g = new THREE.Group();
+  const body = mesh(new THREE.BoxGeometry(1.5, 0.42, 0.78), mat(color, 0.5, 0.3));
+  body.position.y = 0.42;
+  const cabin = mesh(new THREE.BoxGeometry(0.8, 0.38, 0.7), mat('#e8edf3', 0.4, 0.2));
+  cabin.position.set(-0.1, 0.78, 0);
+  const wheels = [];
+  for (const [wx, wz] of [[0.5, 0.42], [0.5, -0.42], [-0.5, 0.42], [-0.5, -0.42]]) {
+    const w = mesh(new THREE.CylinderGeometry(0.21, 0.21, 0.14, 16).rotateX(Math.PI / 2), mat('#22252b', 0.6));
+    w.position.set(wx, 0.21, wz);
+    g.add(w);
+    wheels.push(w);
+  }
+  g.add(body, cabin);
+  g.visible = false;
+  scene.add(g);
+  return { group: g, wheels, x: STATUS_CAR_X0, dir: 1, parked: false };
+}
+function applyStatusCounts(c) {
+  if (TAMU || !c) return;
+  const n = (v) => Math.max(0, Number(v) || 0);
+  // 1) diproses -> figur packing di meja kerja (dibuat sekali, toggle visibilitas).
+  if (n(c.diproses) > 0) {
+    if (!ORDER_ANIM.packing) {
+      ORDER_ANIM.packing = statusActor('status-packing', '#d9772f');
+      ORDER_ANIM.packing.p.root.position.set(STATUS_PACKING.x, 0, STATUS_PACKING.z);
+      ORDER_ANIM.packing.p.root.rotation.set(0, STATUS_PACKING.heading, 0);
+      ORDER_ANIM.packing.heading = STATUS_PACKING.heading;
+    }
+    ORDER_ANIM.packing.p.root.visible = true;
+  } else if (ORDER_ANIM.packing) {
+    ORDER_ANIM.packing.p.root.visible = false;
+  }
+  // 2) pending -> figur pengunjung berjalan masuk dari pintu; bila kembali 0, dihapus.
+  if (n(c.pending) > 0) {
+    if (!ORDER_ANIM.visitor) {
+      ORDER_ANIM.visitor = statusActor('status-pengunjung', '#3f6fd1');
+      ORDER_ANIM.visitor.p.root.position.set(ROOM.x0 - 0.9, 0, CORRIDOR_Z);
+      ORDER_ANIM.visitor.heading = Math.PI / 2; // menghadap +x (masuk ruangan)
+      if (REDUCED) {
+        ORDER_ANIM.visitor.p.root.position.set(STATUS_VISITOR_END.x, 0, STATUS_VISITOR_END.z);
+        ORDER_ANIM.visitor.heading = STATUS_VISITOR_END.heading;
+        ORDER_ANIM.visitorWalking = false;
+      } else {
+        ORDER_ANIM.visitorWp = 0;
+        ORDER_ANIM.visitorWalking = true;
+      }
+    }
+  } else if (ORDER_ANIM.visitor) {
+    removeActor(ORDER_ANIM.visitor);
+    ORDER_ANIM.visitor = null;
+    ORDER_ANIM.visitorWalking = false;
+  }
+  // 3) dikirim -> satu mobil maju-mundur di lajur lurus dekat pintu.
+  if (n(c.dikirim) > 0) {
+    if (!ORDER_ANIM.carKirim) {
+      ORDER_ANIM.carKirim = makeStatusCar('#2f9a6d');
+      ORDER_ANIM.carKirim.group.position.set(STATUS_CAR_X0, 0, -1.65);
+    }
+    ORDER_ANIM.carKirim.group.visible = true;
+    if (REDUCED) ORDER_ANIM.carKirim.group.position.set((STATUS_CAR_X0 + STATUS_CAR_X1) / 2, 0, -1.65);
+  } else if (ORDER_ANIM.carKirim) {
+    ORDER_ANIM.carKirim.group.visible = false;
+  }
+  // 4) selesai-baru -> satu mobil kedua melaju ke titik parkir lalu berhenti.
+  if (n(c.selesaiBaru) > 0) {
+    if (!ORDER_ANIM.carSampai) {
+      ORDER_ANIM.carSampai = makeStatusCar('#6a55c9');
+    }
+    if (!ORDER_ANIM.carSampai.group.visible) {
+      // Muncul lagi setelah sempat 0: ulang dari ujung barat, bukan menumpuk.
+      ORDER_ANIM.carSampai.x = STATUS_CAR_X0;
+      ORDER_ANIM.carSampai.parked = false;
+      ORDER_ANIM.carSampai.group.rotation.y = 0;
+    }
+    ORDER_ANIM.carSampai.group.visible = true;
+    if (REDUCED) {
+      ORDER_ANIM.carSampai.x = STATUS_CAR_PARK_X;
+      ORDER_ANIM.carSampai.parked = true;
+      ORDER_ANIM.carSampai.group.position.set(STATUS_CAR_PARK_X, 0, -2.55);
+    } else if (ORDER_ANIM.carSampai.parked) {
+      ORDER_ANIM.carSampai.group.position.set(STATUS_CAR_PARK_X, 0, -2.55);
+    }
+  } else if (ORDER_ANIM.carSampai) {
+    ORDER_ANIM.carSampai.group.visible = false;
+  }
+}
+function statusTick(dt, t) {
+  if (TAMU || REDUCED) return;
+  // Packing: goyang kecil di tempat (diterapkan setelah updateActor tiap frame).
+  const pk = ORDER_ANIM.packing;
+  if (pk && pk.p.root.visible) {
+    pk.p.spine.rotation.z = Math.sin(t * 2.2) * 0.07;
+    pk.p.spine.rotation.x = 0.12 + Math.sin(t * 2.2) * 0.03;
+    pk.p.head.rotation.x = 0.15 + Math.sin(t * 1.7) * 0.05;
+  }
+  // Pengunjung: jalan manual lewat waypoint (kecepatan sama dgn aktor: 1.6 m/dtk).
+  const vs = ORDER_ANIM.visitor;
+  if (vs && ORDER_ANIM.visitorWalking) {
+    const wp = STATUS_VISITOR_WPS[ORDER_ANIM.visitorWp];
+    const dx = wp.x - vs.p.root.position.x;
+    const dz = wp.z - vs.p.root.position.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist <= 0.05) {
+      if (ORDER_ANIM.visitorWp < STATUS_VISITOR_WPS.length - 1) {
+        ORDER_ANIM.visitorWp++;
+      } else {
+        ORDER_ANIM.visitorWalking = false;
+        vs.heading = STATUS_VISITOR_END.heading;
+      }
+    } else {
+      const step = Math.min(dist, 1.6 * dt);
+      vs.p.root.position.x += (dx / dist) * step;
+      vs.p.root.position.z += (dz / dist) * step;
+      vs.heading = turnTo(vs.heading, Math.atan2(dx, dz), dt * 7);
+      vs.phase += dt * 8;
+      // Ayunan kaki manual (updateActor memakai pose berdiri untuk aktor ini).
+      const sw = Math.sin(vs.phase);
+      vs.p.hip[0].rotation.x = sw * 0.5;
+      vs.p.hip[1].rotation.x = -sw * 0.5;
+      vs.p.knee[0].rotation.x = Math.max(0, -sw) * 0.7;
+      vs.p.knee[1].rotation.x = Math.max(0, sw) * 0.7;
+    }
+  }
+  // Mobil kirim: maju-mundur di lajur, balik arah di ujung.
+  const ck = ORDER_ANIM.carKirim;
+  if (ck && ck.group.visible) {
+    ck.x += ck.dir * 1.2 * dt;
+    if (ck.x >= STATUS_CAR_X1) { ck.x = STATUS_CAR_X1; ck.dir = -1; }
+    if (ck.x <= STATUS_CAR_X0) { ck.x = STATUS_CAR_X0; ck.dir = 1; }
+    ck.group.position.set(ck.x, 0, -1.65);
+    ck.group.rotation.y = ck.dir > 0 ? 0 : Math.PI;
+    for (const w of ck.wheels) w.rotation.z -= ck.dir * (1.2 * dt) / 0.21;
+  }
+  // Mobil sampai: melaju ke titik parkir lalu berhenti (tidak berputar).
+  const cs = ORDER_ANIM.carSampai;
+  if (cs && cs.group.visible && !cs.parked) {
+    cs.x += 1.0 * dt;
+    if (cs.x >= STATUS_CAR_PARK_X) { cs.x = STATUS_CAR_PARK_X; cs.parked = true; }
+    cs.group.position.set(cs.x, 0, -2.55);
+    cs.group.rotation.y = 0;
+    for (const w of cs.wheels) w.rotation.z -= (1.0 * dt) / 0.21;
+  }
 }
 
 // ---------------------------------------------------------------- UI HTML
@@ -2702,6 +2897,7 @@ function frame() {
     updateActor(a, dt, t, now);
     if (a.gone && a.kind === 'freelancer') removeActor(a);
   }
+  if (!TAMU) statusTick(dt, t, now); // ANIMASI STATUS ORDER (admin saja)
   if (TAMU) tamuTick(dt, t, now);
   for (const d of Object.values(desks)) updateDeskScreens(d, now);
   if (!REDUCED) chatter(now);

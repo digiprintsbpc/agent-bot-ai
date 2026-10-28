@@ -55,6 +55,8 @@
         <button class="tab-btn" data-tab="produk">📦 Produk</button>
         <button class="tab-btn" data-tab="keuangan">💸 Keuangan</button>
         <button class="tab-btn" data-tab="bahan">📄 Bahan Baku</button>
+        <button class="tab-btn" data-tab="keputusan">⏳ Keputusan Order</button>
+        <button class="tab-btn" data-tab="kas">💰 Kas</button>
       </nav>
     </div>
   </div>
@@ -258,6 +260,63 @@
         <div id="hppAsumsi" class="text-xs text-slate-500 bg-slate-50 rounded-lg p-3"></div>
       </div>
     </section>
+
+    <!-- ============ TAB 7: KEPUTUSAN ORDER ============ -->
+    <section id="tab-keputusan" class="hidden">
+      <div class="card mb-3">
+        <h2 class="font-semibold mb-1">⏳ Order yang Butuh Keputusan</h2>
+        <p class="text-xs text-slate-500 mb-3">Pending lebih dari 3 hari dan diproses lebih dari 5 hari (umur dihitung dari updated_at). Tombol ubah status memakai jalur yang sama dengan Kelola Order (termasuk notifikasi WA ke customer bila gagal tulis, tampil pesan error — bukan klaim sukses). Untuk order pending, kirim QRIS baru tetap lewat bot: salin perintahnya dari tombol.</p>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+            <th class="py-2 pr-2">Order</th><th class="pr-2">Nama</th><th class="pr-2">WA</th><th class="pr-2">Total</th><th class="pr-2">Status</th><th class="pr-2">Umur</th><th>Aksi</th>
+          </tr></thead><tbody id="kpRows"></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ TAB 8: KAS ============ -->
+    <section id="tab-kas" class="hidden">
+      <div id="kasMigration" class="card mb-3 hidden">
+        <p class="text-sm text-red-700">⚠️ Tabel kas belum ada. Jalankan <b>sql-kas.sql</b> di SQL Editor Supabase (project toko), lalu buka lagi tab ini.</p>
+      </div>
+      <div class="card mb-3">
+        <h2 class="font-semibold mb-2">💰 Rekap Kas Bulanan</h2>
+        <div class="flex gap-2 items-center mb-3">
+          <input id="kasBulan" type="month" class="inp !w-48 !py-2 text-sm">
+          <button id="kasLoad" class="btn-primary !py-2 text-sm">Tampilkan</button>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">
+          <div><p class="text-xs text-slate-500">Masuk (order, otomatis)</p><p id="kasMasukAuto" class="text-lg font-bold text-indigo-700">–</p><p id="kasMasukAutoCount" class="text-xs text-slate-500"></p></div>
+          <div><p class="text-xs text-slate-500">Masuk (manual)</p><p id="kasMasukManual" class="text-lg font-bold text-indigo-700">–</p></div>
+          <div><p class="text-xs text-slate-500">Keluar (pengeluaran)</p><p id="kasKeluarPeng" class="text-lg font-bold text-red-600">–</p></div>
+          <div><p class="text-xs text-slate-500">Keluar (manual)</p><p id="kasKeluarManual" class="text-lg font-bold text-red-600">–</p></div>
+          <div><p class="text-xs text-slate-500">Saldo Bulan Ini</p><p id="kasSaldo" class="text-lg font-bold text-green-700">–</p></div>
+        </div>
+        <p class="text-xs text-slate-500">Kas = satu dompet: semua pemasukan masuk kas, semua pengeluaran ambil dari kas. Pemasukan order sudah otomatis — input manual hanya untuk pemasukan di luar order. Pemasukan order TIDAK ditulis ulang sebagai entri manual (anti double-count).</p>
+      </div>
+      <div class="card mb-3 max-w-2xl">
+        <h2 class="font-semibold mb-2">➕ Tambah Entri Manual</h2>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+          <input id="kasTanggal" type="date" class="inp text-sm">
+          <select id="kasJenis" class="inp text-sm"><option value="masuk">Masuk</option><option value="keluar">Keluar</option></select>
+          <input id="kasNominal" type="number" class="inp text-sm" placeholder="Nominal (Rp)">
+          <input id="kasKet" class="inp text-sm" placeholder="Keterangan">
+        </div>
+        <button id="kasAdd" class="btn-primary !py-2 text-sm mt-2">Simpan Entri</button>
+      </div>
+      <div class="card mb-3 overflow-x-auto">
+        <h2 class="font-semibold mb-2">📝 Entri Manual Bulan Ini</h2>
+        <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+          <th class="py-2 pr-2">Tanggal</th><th class="pr-2">Jenis</th><th class="pr-2">Keterangan</th><th class="pr-2">Nominal</th><th></th>
+        </tr></thead><tbody id="kasRows"></tbody></table>
+      </div>
+      <div class="card overflow-x-auto">
+        <h2 class="font-semibold mb-2">💸 Pengeluaran Bulan Ini (dari tabel pengeluaran)</h2>
+        <table class="w-full text-sm"><thead><tr class="text-left text-slate-500 border-b">
+          <th class="py-2 pr-2">Tanggal</th><th class="pr-2">Keterangan</th><th class="pr-2">Nominal</th>
+        </tr></thead><tbody id="kasPengRows"></tbody></table>
+      </div>
+    </section>
   </div>
 </div>
 
@@ -291,7 +350,7 @@ function showLogin(bad) {
 document.getElementById('logoutBtn').onclick = () => { sessionStorage.removeItem('dash_pin'); PIN=''; showLogin(false); };
 
 /* ---------- tabs ---------- */
-const TABS = ['dash','order-baru','orders','produk','keuangan','bahan'];
+const TABS = ['dash','order-baru','orders','produk','keuangan','bahan','keputusan','kas'];
 document.querySelectorAll('#tabs .tab-btn').forEach(b => b.onclick = () => {
   document.querySelectorAll('#tabs .tab-btn').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
@@ -301,6 +360,8 @@ document.querySelectorAll('#tabs .tab-btn').forEach(b => b.onclick = () => {
   if (b.dataset.tab === 'produk') loadProduk();
   if (b.dataset.tab === 'keuangan') loadKeuangan();
   if (b.dataset.tab === 'bahan') loadBahanTab();
+  if (b.dataset.tab === 'keputusan') loadKeputusan();
+  if (b.dataset.tab === 'kas') loadKas();
   window.scrollTo(0, 0);
 });
 function showTab(key) {
@@ -778,6 +839,94 @@ async function hitungHpp() {
     '<li>Harga katalog TIDAK diubah oleh modul ini.</li></ul>' +
     `<p class="mt-2">Config aktif: margin ${d.config.margin_persen}%, print Rp ${Number(d.config.biaya_print_per_lembar).toLocaleString('id-ID')}/lembar, untung rim Rp ${Number(d.config.keuntungan_rim).toLocaleString('id-ID')}, ambang ${d.ambang_persen}%.</p>`;
 }
+
+/* ---------- TAB 7: keputusan order ---------- */
+async function loadKeputusan() {
+  const r = await api('/api/dash-admin?action=keputusan-order');
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  document.getElementById('kpRows').innerHTML = (d.orders || []).map(o => `
+    <tr class="border-b last:border-0">
+      <td class="py-2 pr-2 font-mono text-xs">${o.id}<br><span class="text-slate-400">${fmtTgl(o.tanggal)}</span></td>
+      <td class="pr-2">${esc(o.nama_penerima)}</td>
+      <td class="pr-2 font-mono text-xs">${esc(o.nomor_wa || '-')}</td>
+      <td class="pr-2">${rp(o.total_harga)}</td>
+      <td class="pr-2"><span class="status-${o.status} text-xs px-2 py-0.5 rounded-full">${STATUS_LABEL[o.status] || o.status}</span></td>
+      <td class="pr-2">${o.umur_hari} hari</td>
+      <td class="whitespace-nowrap">
+        ${o.status === 'pending' ? `<button class="text-indigo-600 text-xs font-semibold mr-2" onclick="kpSalin('kirim qris ${o.id}')">Salin: kirim qris</button>` : ''}
+        <button class="text-indigo-600 text-xs font-semibold mr-2" onclick="kpAksi('${o.id}', 'batal')">Batalkan</button>
+        <button class="text-indigo-600 text-xs font-semibold mr-2" onclick="kpAksi('${o.id}', 'dikirim')">Dikirim</button>
+        <button class="text-indigo-600 text-xs font-semibold" onclick="kpAksi('${o.id}', 'selesai')">Selesai</button>
+      </td></tr>`).join('')
+    || '<tr><td colspan="7" class="py-3 text-center text-slate-400">Tidak ada order basi — semua order masih dalam batas umur.</td></tr>';
+}
+async function kpAksi(id, status) {
+  if (!confirm(`Ubah ${id} menjadi ${STATUS_LABEL[status] || status}?`)) return;
+  const r = await api('/api/dash-admin?action=update-order', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, status }) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  loadKeputusan();
+}
+async function kpSalin(teks) {
+  try { await navigator.clipboard.writeText(teks); alert('✅ Perintah disalin: ' + teks + ' — tempel di chat bot Telegram owner.'); }
+  catch { prompt('Salin perintah ini ke chat bot Telegram owner:', teks); }
+}
+
+/* ---------- TAB 8: kas ---------- */
+function kasBulanDefault() {
+  try { return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' }).slice(0, 7); }
+  catch { return ''; }
+}
+async function loadKas() {
+  const bulan = document.getElementById('kasBulan').value || kasBulanDefault();
+  document.getElementById('kasBulan').value = bulan;
+  const r = await api('/api/dash-admin?action=kas&bulan=' + encodeURIComponent(bulan));
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  document.getElementById('kasMigration').classList.toggle('hidden', !d.belumMigrasi);
+  document.getElementById('kasMasukAuto').textContent = rp(d.masuk_otomatis);
+  document.getElementById('kasMasukAutoCount').textContent = d.masuk_otomatis_count + ' order dibayar';
+  document.getElementById('kasMasukManual').textContent = rp(d.masuk_manual);
+  document.getElementById('kasKeluarPeng').textContent = rp(d.keluar_pengeluaran);
+  document.getElementById('kasKeluarManual').textContent = rp(d.keluar_manual);
+  document.getElementById('kasSaldo').textContent = rp(d.saldo);
+  document.getElementById('kasRows').innerHTML = (d.manual || []).map(e => `
+    <tr class="border-b last:border-0"><td class="py-2 pr-2 text-xs">${fmtTgl(e.tanggal)}</td>
+    <td class="pr-2"><span class="text-xs px-2 py-0.5 rounded-full ${e.jenis === 'masuk' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}">${e.jenis}</span></td>
+    <td class="pr-2">${esc(e.keterangan)}</td><td class="pr-2">${rp(e.nominal)}</td>
+    <td><button class="btn-danger" onclick="kasDel('${e.id}')">Hapus</button></td></tr>`).join('')
+    || '<tr><td colspan="5" class="py-3 text-center text-slate-400">Belum ada entri manual bulan ini</td></tr>';
+  document.getElementById('kasPengRows').innerHTML = (d.keluar_pengeluaran_rows || []).map(p => `
+    <tr class="border-b last:border-0"><td class="py-2 pr-2 text-xs">${fmtTgl(p.tanggal)}</td>
+    <td class="pr-2">${esc(p.keterangan)}</td><td class="pr-2">${rp(p.nominal)}</td></tr>`).join('')
+    || '<tr><td colspan="3" class="py-3 text-center text-slate-400">Belum ada pengeluaran bulan ini</td></tr>';
+}
+document.getElementById('kasLoad').onclick = loadKas;
+document.getElementById('kasAdd').onclick = async () => {
+  const payload = {
+    tanggal: document.getElementById('kasTanggal').value,
+    jenis: document.getElementById('kasJenis').value,
+    nominal: document.getElementById('kasNominal').value,
+    keterangan: document.getElementById('kasKet').value.trim(),
+  };
+  if (!payload.nominal) return alert('Nominal wajib diisi');
+  const r = await api('/api/dash-admin?action=save-kas-entry', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  document.getElementById('kasNominal').value = ''; document.getElementById('kasKet').value = '';
+  loadKas();
+};
+async function kasDel(id) {
+  if (!confirm('Hapus entri kas ini?')) return;
+  const r = await api('/api/dash-admin?action=delete-kas-entry', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+  const d = await r.json();
+  if (!d.ok) return alert('❌ ' + d.error);
+  loadKas();
+};
 
 /* ---------- boot ---------- */
 async function boot() { await loadDash(); }

@@ -145,11 +145,10 @@ async function fetchOrderFull(orderId) {
     + `&id=eq.${orderId}&limit=1`
   );
   if (!orders.length) return null;
-  // Skema nyata order_items HANYA punya product_id, nama_produk, qty
-  // (tidak ada kolom harga) — jangan select kolom yang tidak ada, karena
-  // PostgREST akan 400 dan item jadi hilang dari template.
+  // order_items.harga_satuan TERVERIFIKASI ADA (live 28 Okt 2026) — dipakai
+  // untuk harga + subtotal per item di template INV lengkap.
   const items = await sbFetch(
-    `order_items?select=nama_produk,qty&order_id=eq.${orderId}&limit=50`
+    `order_items?select=nama_produk,qty,harga_satuan&order_id=eq.${orderId}&limit=50`
   ).catch(() => []);
   return { order: orders[0], items: Array.isArray(items) ? items : [] };
 }
@@ -157,10 +156,11 @@ async function fetchOrderFull(orderId) {
 function formatItems(items) {
   if (!items.length) return '(tidak ada rincian item)';
   return items.map((it, idx) => {
-    const harga = it.harga_satuan != null && it.harga_satuan !== ''
-      ? ` @ ${rp(it.harga_satuan)}`
-      : '';
-    return `${idx + 1}. ${it.nama_produk} ×${it.qty}${harga}`;
+    const hs = it.harga_satuan;
+    // NULL-safe: baris tanpa harga_satuan tampil tanpa harga (baris lain utuh).
+    if (hs == null || hs === '') return `${idx + 1}. ${it.nama_produk} ×${it.qty}`;
+    const subtotal = Number(it.qty || 0) * Number(hs);
+    return `${idx + 1}. ${it.nama_produk} ×${it.qty} @ ${rp(hs)} = ${rp(subtotal)}`;
   }).join('\n');
 }
 

@@ -22,6 +22,20 @@
  * POST ?action=delete-bahan-baku           → body: id
  * POST ?action=save-bahan-baku-config      → body: margin_persen, biaya_print_per_lembar, keuntungan_rim, komposisi {1:[...],2:[...],3:[...]}
  * POST ?action=compute-hpp                 → body opsional (override simulasi): margin_persen, biaya_print_per_lembar, keuntungan_rim, komposisi, ambang_persen
+ * GET  ?action=keputusan-order            → order basi (pending >3 hari, diproses >5 hari, umur dari updated_at)
+ * GET  ?action=kas&bulan=YYYY-MM          → rekap kas bulanan (otomatis + manual + pengeluaran)
+ * POST ?action=save-kas-entry             → body: jenis masuk/keluar, nominal, keterangan, tanggal? (YYYY-MM-DD; sumber selalu 'manual')
+ * POST ?action=delete-kas-entry           → body: id
+ *
+ * MODUL KAS (BUNDLE, disetujui pemilik 28 Okt 2026):
+ * kas = satu dompet — SEMUA pemasukan masuk kas, SEMUA pengeluaran keluar
+ * dari kas; input manual selama bulan berjalan; rekap akhir bulan.
+ * Pemasukan OTOMATIS dari orders berstatus diproses/dikirim/selesai dihitung
+ * saat rekap — TIDAK ditulis ke kas_entries (anti double-count bila pemilik
+ * juga input manual). Pengeluaran = tabel pengeluaran yang sudah ada
+ * (id uuid, tanggal default now(), nominal, keterangan — lihat
+ * supabase-migrasi-fitur-admin.sql) + entri manual keluar di kas_entries.
+ * Butuh tabel kas_entries (lihat sql-kas.sql — dijalankan pemilik).
  *
  * MODUL BAHAN BAKU / HPP (FASE 2, rumus sheet "Offline" pemilik):
  * modul ini TIDAK mengubah harga katalog. Ia hanya menghitung HPP +
@@ -46,6 +60,77 @@ function wibDayStart(daysAgo = 0) {
   wib.setUTCHours(0, 0, 0, 0);
   wib.setUTCDate(wib.getUTCDate() - daysAgo);
   return new Date(wib.getTime() - 7 * 3600 * 1000).toISOString();
+}
+
+/* ---------- modul kas: rentang bulan WIB + hitung rekap ---------- */
+function wibMonthRangeISO(ym) {
+  let y, m;
+  if (/^\d{4}-\d{2}$/.test(ym || '')) { [y, m] = ym.split('-').map(Number); }
+  else {
+    const now = new Date(new Date().getTime() + 7 * 3600 * 1000);
+    y = now.getUTCFullYear(); m = now.getUTCMonth() + 1;
+  }
+  const start = new Date(Date.UTC(y, m - 1, 1) - 7 * 3600 * 1000).toISOString();
+  const nm = m === 12 ? 1 : m + 1, ny = m === 12 ? y + 1 : y;
+  const end = new Date(Date.UTC(ny, nm - 1, 1) - 7 * 3600 * 1000).toISOString();
+  return { start, end, ym: `${y}-${String(m).padStart(2, '0')}` };
+}
+
+// Pure: order basi bila pending >3 hari atau diproses >5 hari (umur dari
+// updated_at, jatuh ke tanggal bila updated_at kosong). Batas tegas: tepat
+// 3/5 hari BELUM basi (syarat > bukan >=).
+function isBasi(o, nowMs = Date.now()) {
+  const t = Date.parse(o.updated_at || o.tanggal);
+  if (!Number.isFinite(t)) return false;
+  const umurHari = Math.floor((nowMs - t) / 86400000);
+  return (o.status === 'pending' && umurHari > 3) || (o.status === 'diproses' && umurHari > 5);
+}
+
+// Pure: matematika rekap kas. Pemasukan otomatis (autoRows) dan entri manual
+// dijumlahkan dari sumber TERPISAH — order tidak pernah ditulis ke manual,
+// jadi tidak mungkin double-count selama pemanggil memakai jalur ini.
+function rekapKasRows({ autoRows = [], manual = [], keluarRows = [] }) {
+  const sum = (arr, k) => arr.reduce((a, o) => a + Number(o[k] || 0), 0);
+  const masukManual = manual.filter((e) => e.jenis === 'masuk');
+  const keluarManual = manual.filter((e) => e.jenis === 'keluar');
+  const masukOtomatis = sum(autoRows, 'total_harga');
+  const masukManualTotal = sum(masukManual, 'nominal');
+  const keluarPengeluaran = sum(keluarRows, 'nominal');
+  const keluarManualTotal = sum(keluarManual, 'nominal');
+  const masukTotal = masukOtomatis + masukManualTotal;
+  const keluarTotal = keluarPengeluaran + keluarManualTotal;
+  return {
+    masuk_otomatis: masukOtomatis, masuk_otomatis_count: autoRows.length,
+    masuk_manual: masukManualTotal, masuk_manual_rows: masukManual,
+    keluar_pengeluaran: keluarPengeluaran, keluar_pengeluaran_rows: keluarRows,
+    keluar_manual: keluarManualTotal, keluar_manual_rows: keluarManual,
+    masuk_total: masukTotal, keluar_total: keluarTotal,
+    saldo: masukTotal - keluarTotal,
+  };
+}
+
+async function hitungKas(ym) {
+  const { start, end, ym: bulan } = wibMonthRangeISO(ym);
+  // Entri manual (tabel baru; bila query gagal -> belumMigrasi, bukan error).
+  let manual = [];
+  let belumMigrasi = false;
+  try {
+    const rows = await sbGet('kas_entries', { select: 'id,tanggal,jenis,keterangan,nominal,sumber,order_id', tanggal: `gte.${start}`, order: 'tanggal.desc', limit: 500 });
+    manual = rows.filter((e) => e.tanggal < end);
+  } catch (e) { belumMigrasi = true; }
+  // Pemasukan OTOMATIS: order yang SUDAH DIBAYAR (pending/batal bukan pemasukan).
+  const orders = await sbGet('orders', {
+    select: 'total_harga,tanggal', status: 'in.(diproses,dikirim,selesai)',
+    tanggal: `gte.${start}`, limit: 1000,
+  });
+  const autoRows = orders.filter((o) => o.tanggal < end);
+  // Pengeluaran dari tabel yang sudah ada (kosong bila tabel belum ada).
+  let keluarRows = [];
+  try {
+    const rows = await sbGet('pengeluaran', { select: 'id,tanggal,nominal,keterangan', tanggal: `gte.${start}`, order: 'tanggal.desc', limit: 1000 });
+    keluarRows = rows.filter((o) => o.tanggal < end);
+  } catch { /* tabel belum ada -> dianggap kosong */ }
+  return { bulan, belumMigrasi, ...rekapKasRows({ autoRows, manual, keluarRows }), manual };
 }
 
 async function sbGet(table, params) {
@@ -251,6 +336,26 @@ module.exports = async (req, res) => {
       } catch (e) {
         return res.status(200).json({ ok: false, error: e.message, belumMigrasi: !!e.belumMigrasi });
       }
+    }
+
+    if (method === 'GET' && action === 'keputusan-order') {
+      const rows = await sbGet('orders', {
+        select: 'id,tanggal,updated_at,nama_penerima,nomor_wa,total_harga,status',
+        status: 'in.(pending,diproses)', order: 'updated_at.asc', limit: 200,
+      });
+      const now = Date.now();
+      const orders = rows.map((o) => {
+        const t = Date.parse(o.updated_at || o.tanggal);
+        const umurHari = Number.isFinite(t) ? Math.floor((now - t) / 86400000) : 0;
+        return { ...o, umur_hari: umurHari };
+      }).filter((o) => isBasi(o, now));
+      return res.status(200).json({ ok: true, orders });
+    }
+
+    if (method === 'GET' && action === 'kas') {
+      const ym = String(req.query?.bulan || '');
+      const hasil = await hitungKas(ym);
+      return res.status(200).json({ ok: true, ...hasil });
     }
 
     // ---------- POST ----------
@@ -515,6 +620,24 @@ module.exports = async (req, res) => {
         }
       }
 
+      if (action === 'save-kas-entry') {
+        const jenis = String(b.jenis || '');
+        const nominal = Number(b.nominal || 0);
+        if (!['masuk', 'keluar'].includes(jenis)) return res.status(400).json({ ok: false, error: 'Jenis harus masuk atau keluar' });
+        if (!Number.isFinite(nominal) || nominal <= 0) return res.status(400).json({ ok: false, error: 'Nominal harus > 0' });
+        const tanggal = String(b.tanggal || '').trim();
+        const row = { jenis, nominal, keterangan: String(b.keterangan || ''), sumber: 'manual' };
+        if (/^\d{4}-\d{2}-\d{2}$/.test(tanggal)) row.tanggal = new Date(tanggal + 'T00:00:00+07:00').toISOString();
+        const created = await sbPost('kas_entries', [row]);
+        return res.status(200).json({ ok: true, id: created[0]?.id || null });
+      }
+
+      if (action === 'delete-kas-entry') {
+        const del = await sbDelete('kas_entries', { id: `eq.${String(b.id || '')}` });
+        if (!del.length) return res.status(404).json({ ok: false, error: 'Entri kas tidak ditemukan — tidak ada yang terhapus.' });
+        return res.status(200).json({ ok: true });
+      }
+
       return res.status(400).json({ ok: false, error: 'Aksi tidak dikenal' });
     }
 
@@ -524,3 +647,8 @@ module.exports = async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
+
+// Helper murni untuk tes stub (handler utama tetap module.exports).
+module.exports.isBasi = isBasi;
+module.exports.rekapKasRows = rekapKasRows;
+module.exports.wibMonthRangeISO = wibMonthRangeISO;

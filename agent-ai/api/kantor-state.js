@@ -41,7 +41,41 @@ async function getActivities(limit = 80) {
 
 const memberOf = (kind) => TEAM.find((m) => m.kind === kind) || TEAM[0];
 
-function buildState(events) {
+// Hitungan order untuk animasi status kantor (mode penuh SAJA).
+// Isinya HANYA angka — tanpa nama, nominal, ID, atau data customer apa pun.
+// selesaiBaru: order selesai yang updated_at-nya dalam 3 hari terakhir,
+// supaya animasi "mobil sampai" mencerminkan penyelesaian baru, bukan riwayat.
+const ORDER_COUNTS_ZERO = { pending: 0, diproses: 0, dikirim: 0, selesaiBaru: 0 };
+const SELESAI_BARU_MS = 3 * 24 * 3600 * 1000;
+
+async function getOrderCounts() {
+  if (!SB_URL || !SB_KEY || SB_KEY.includes('___ISI')) return { ...ORDER_COUNTS_ZERO };
+  try {
+    const q = new URLSearchParams({
+      select: 'status,updated_at',
+      order: 'updated_at.desc',
+      limit: '200',
+    });
+    const res = await fetch(`${SB_URL}/rest/v1/orders?${q}`, {
+      headers: { apikey: SB_KEY },
+    });
+    if (!res.ok) return { ...ORDER_COUNTS_ZERO };
+    const rows = await res.json();
+    const counts = { ...ORDER_COUNTS_ZERO };
+    const cutoff = Date.now() - SELESAI_BARU_MS;
+    for (const r of Array.isArray(rows) ? rows : []) {
+      if (r.status === 'pending') counts.pending++;
+      else if (r.status === 'diproses') counts.diproses++;
+      else if (r.status === 'dikirim') counts.dikirim++;
+      else if (r.status === 'selesai' && r.updated_at && Date.parse(r.updated_at) >= cutoff) counts.selesaiBaru++;
+    }
+    return counts;
+  } catch {
+    return { ...ORDER_COUNTS_ZERO };
+  }
+}
+
+function buildState(events, orderCounts = ORDER_COUNTS_ZERO) {
   const now = Date.now();
   const iso = new Date(now).toISOString();
   const asc = [...events].reverse(); // tertua -> terbaru
@@ -148,6 +182,8 @@ function buildState(events) {
     },
     spare_desks: 0,
     public_url: null,
+    // Hanya angka (lihat getOrderCounts); dihapus eksplisit di buildStatePublik().
+    orderCounts: { ...orderCounts },
   };
 }
 
@@ -175,6 +211,8 @@ function buildStatePublik() {
   base.feed = [];
   base.runs = [];
   base.stats = { active: 1, freelancers: 0, total: 0, recent_starts: [], sessions_active: 1 };
+  // Mode tamu tidak boleh menerima data order sama sekali — hapus hitungannya.
+  delete base.orderCounts;
   return base;
 }
 
@@ -190,7 +228,8 @@ module.exports = async (req, res) => {
       return res.status(401).json({ ok: false, error: 'PIN diperlukan untuk mode penuh' });
     }
     const events = await getActivities(80);
-    res.status(200).json(buildState(events));
+    const orderCounts = await getOrderCounts();
+    res.status(200).json(buildState(events, orderCounts));
   } catch (e) {
     res.status(200).json(buildState([]));
   }
