@@ -6,7 +6,7 @@
  *  2) Follow-up 30 hari: promo ke customer lama (anti-dobel via followup_log).
  * Port dari interval bot lama. Auth: Authorization: Bearer CRON_SECRET.
  */
-const { sendMessage, sendDocument } = require('../../lib/telegram-api');
+const { sendMessage, sendDocument } = require('../lib/telegram-api');
 
 const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SB_KEY = process.env.SUPABASE_SERVICE_KEY || '';
