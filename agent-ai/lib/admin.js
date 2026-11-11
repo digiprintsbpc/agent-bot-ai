@@ -1503,10 +1503,17 @@ async function handleFotoOtomatis(chatId, msg, captionText) {
   const info = extractResiInfo(ocr.text);
   console.log('[ocr-resi]', JSON.stringify(info));
 
-  // Cari order: prioritaskan INV, fallback ke nama penerima
+  // Cari order: prioritaskan INV, lalu ID marketplace, fallback ke nama penerima
   let order = null;
   if (info.inv) {
     const rows = await sbGet('orders', { select: 'id,nama_penerima,nomor_wa,alamat_lengkap,status', id: `eq.${info.inv}`, limit: 1 }).catch(() => []);
+    if (rows[0]) order = rows[0];
+  }
+  if (!order && info.marketplaceId) {
+    // Order marketplace (Shopee/dll): cocokkan ID alfanumerik persis (cth. 261109TSSCYAS5).
+    // Nama penerima di database marketplace cuma placeholder ("Customer MKT"), jadi
+    // pencocokan nama tidak bisa diandalkan untuk order jenis ini.
+    const rows = await sbGet('orders', { select: 'id,nama_penerima,nomor_wa,alamat_lengkap,status', id: `eq.${info.marketplaceId}`, limit: 1 }).catch(() => []);
     if (rows[0]) order = rows[0];
   }
   if (!order && info.penerima) {
@@ -1607,12 +1614,18 @@ async function handleMarketplace(chatId, text) {
 
 // ---------- Template order terisi → buat order + QRIS ----------
 async function handleTemplateOrder(chatId, text) {
-  // Nomor WA: hanya label resmi template ("Nomor wa Penerima:") — sesuai
-  // keputusan 23 Okt (fix toleran tidak dipakai) dan template customer yang
-  // tetap berformat. Template lama/varian lain ditolak dengan pesan di bawah.
-  let waMatch = text.match(/Nomor wa Penerima:\s*(.+)/i);
+  // Nomor WA: terima variasi label ("Nomor wa Penerima", "Nomor wa", "No WA",
+  // "Nomor WhatsApp") & format nomor bebas (08…, +62 …, spasi/strip) — template
+  // dari sumber mana pun harus tetap terbaca.
+  let waMatch = text.match(/Nomor\s*(?:wa|whatsapp|hp)\s*(?:Penerima)?\s*:\s*(.+)/i)
+    || text.match(/No\.?\s*(?:wa|whatsapp|hp)\s*(?:Penerima)?\s*:\s*(.+)/i);
+  if (!waMatch) {
+    // Cadangan: baris mana pun yang menyebut wa/whatsapp/hp dan memuat ≥9 digit
+    const barisWa = text.split(/\n/).find((l) => /\b(wa|whatsapp|hp)\b/i.test(l) && l.replace(/[^0-9]/g, '').length >= 9);
+    if (barisWa) waMatch = [null, barisWa];
+  }
   if (!waMatch || formatWA(waMatch[1]).length < 10) {
-    await tg.sendMessage(chatId, '❌ WA wajib isi! Pastikan ada baris nomor WA, contoh: "Nomor wa Penerima: 081234567890".');
+    await tg.sendMessage(chatId, '❌ WA wajib isi! Pastikan ada baris nomor WA, contoh: "Nomor wa: 081234567890".');
     return;
   }
   const namaMatch = text.match(/Nama Penerima:\s*(.+)/i);
