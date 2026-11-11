@@ -42,19 +42,35 @@ function extractAmounts(text) {
 
 /**
  * Ekstrak info resi pengiriman dari teks OCR.
- * Return: { inv, resi, resiKurir, penerima }
+ * Return: { inv, resi, resiKurir, penerima, marketplaceId }
  * - inv: nomor pesanan /INV-\d{6}/i
+ * - marketplaceId: nomor pesanan marketplace (Shopee/dll), cth. 261109TSSCYAS5
  * - resi: nomor resi/awb terkuat
  * - resiKurir: tebakan kurir (JNE/J&T/SiCepat/dll)
  * - penerima: nama penerima (dekat kata "penerima"/"kepada"/"to")
  */
 function extractResiInfo(text) {
   const t = String(text || '');
-  const out = { inv: null, resi: null, resiKurir: null, penerima: null };
+  const out = { inv: null, resi: null, resiKurir: null, penerima: null, marketplaceId: null };
 
   // 1) Nomor pesanan INV-xxxxxx
   const invM = t.match(/INV-\d{6}/i);
   if (invM) out.inv = invM[0].toUpperCase();
+
+  // 1b) Nomor pesanan marketplace (Shopee/Tokopedia/dll) — alfanumerik, cth. 261109TSSCYAS5.
+  // Prioritas: kata kunci "No. Pesanan" / "Nomor Pesanan" / "Order ID",
+  // lalu pola umum: 6 digit (YYMMDD) + 6-14 karakter alfanumerik yang mengandung huruf
+  // (syarat huruf membedakan ID pesanan dari nomor resi / WA yang murni angka).
+  const mpKeyword = t.match(/(?:no\.?\s*pesanan|nomor\s*pesanan|order\s*id|no\.?\s*order)[\s:]*\(?\s*([A-Z0-9]{8,20})\)?/i);
+  if (mpKeyword) out.marketplaceId = mpKeyword[1].toUpperCase();
+  if (!out.marketplaceId) {
+    const mpRe = /\b\d{6}[A-Z0-9]{6,14}\b/g;
+    let mm;
+    while ((mm = mpRe.exec(t))) {
+      const cand = mm[0].toUpperCase();
+      if (/[A-Z]/.test(cand)) { out.marketplaceId = cand; break; }
+    }
+  }
 
   // 2) Nomor resi — cari kandidat per kurir, pilih yang paling kuat
   const candidates = [];
