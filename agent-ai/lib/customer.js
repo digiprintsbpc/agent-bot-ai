@@ -13,7 +13,7 @@ const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SB_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const OWNER_ID = String(process.env.TELEGRAM_ALLOWED_ID || '');
 
-const sbHeaders = () => ({ apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/json' });
+const sbHeaders = () => ({ apikey: SB_KEY, 'Content-Type': 'application/json' });
 
 async function sbGet(table, params = {}) {
   const q = new URLSearchParams(params);

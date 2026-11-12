@@ -34,7 +34,7 @@ const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SB_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const OWNER_ID = String(process.env.TELEGRAM_ALLOWED_ID || '');
 
-const sbHeaders = () => ({ apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/json' });
+const sbHeaders = () => ({ apikey: SB_KEY, 'Content-Type': 'application/json' });
 async function sbGet(table, params = {}) {
   const q = new URLSearchParams(params);
   const res = await fetch(`${SB_URL}/rest/v1/${table}?${q}`, { headers: sbHeaders() });
@@ -1372,7 +1372,7 @@ async function handleInvoice(chatId, orderId) {
       const fileName = `Invoice-${orderId}-${Date.now()}.pdf`;
       const upRes = await fetch(`${SB_URL}/storage/v1/object/invoices/${fileName}`, {
         method: 'POST',
-        headers: { ...sbHeaders(), 'Content-Type': 'application/pdf' },
+        headers: { ...sbHeaders(), Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/pdf' },
         body: pdfBuffer,
       });
       if (upRes.ok) publicUrl = `${SB_URL}/storage/v1/object/public/invoices/${fileName}`;
@@ -1417,7 +1417,7 @@ async function handleInvoiceToWA(chatId, orderId) {
     const fileName = `Invoice-${orderId}-${Date.now()}.pdf`;
     const upRes = await fetch(`${SB_URL}/storage/v1/object/invoices/${fileName}`, {
       method: 'POST',
-      headers: { ...sbHeaders(), 'Content-Type': 'application/pdf' },
+      headers: { ...sbHeaders(), Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/pdf' },
       body: pdfBuffer,
     });
     if (!upRes.ok) {
@@ -1569,7 +1569,7 @@ async function handleFotoOtomatis(chatId, msg, captionText) {
         const imgName = `resi-${order.id}-${Date.now()}.jpg`;
         const upImg = await fetch(`${SB_URL}/storage/v1/object/invoices/${imgName}`, {
           method: 'POST',
-          headers: { ...sbHeaders(), 'Content-Type': 'image/jpeg' },
+          headers: { ...sbHeaders(), Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'image/jpeg' },
           body: imgBuf,
         });
         if (upImg.ok) imgPublicUrl = `${SB_URL}/storage/v1/object/public/invoices/${imgName}`;
