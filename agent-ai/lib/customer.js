@@ -13,7 +13,7 @@ const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SB_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const OWNER_ID = String(process.env.TELEGRAM_ALLOWED_ID || '');
 
-const sbHeaders = () => ({ apikey: SB_KEY, 'Content-Type': 'application/json' });
+const sbHeaders = () => ({ apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/json' });
 
 async function sbGet(table, params = {}) {
   const q = new URLSearchParams(params);
@@ -659,7 +659,7 @@ async function handleCustomerPhoto(userId, fileId) {
         const pdfBuffer = await generateInvoice({ ...orders[0], items });
         const fileName = `Invoice-${d.order_id}-${Date.now()}.pdf`;
         const upR = await fetch(`${SB_URL2}/storage/v1/object/invoices/${fileName}`, {
-          method: 'POST', headers: { apikey: SB_KEY2, 'Content-Type': 'application/pdf' }, body: pdfBuffer,
+          method: 'POST', headers: { apikey: SB_KEY2, Authorization: `Bearer ${SB_KEY2}`, 'Content-Type': 'application/pdf' }, body: pdfBuffer,
         });
         if (upR.ok) {
           const publicUrl = `${SB_URL2}/storage/v1/object/public/invoices/${fileName}`;

@@ -68,7 +68,7 @@ module.exports = async (req, res) => {
     const fileName = `Invoice-${order_id}-${Date.now()}.pdf`;
     const upRes = await fetch(`${SB_URL}/storage/v1/object/invoices/${fileName}`, {
       method: 'POST',
-      headers: { apikey: SB_KEY, 'Content-Type': 'application/pdf' },
+      headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/pdf' },
       body: pdfBuffer,
     });
     if (!upRes.ok) {
