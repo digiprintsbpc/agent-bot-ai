@@ -1372,7 +1372,7 @@ async function handleInvoice(chatId, orderId) {
       const fileName = `Invoice-${orderId}-${Date.now()}.pdf`;
       const upRes = await fetch(`${SB_URL}/storage/v1/object/invoices/${fileName}`, {
         method: 'POST',
-        headers: { ...sbHeaders(), Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/pdf' },
+        headers: { ...sbHeaders(), 'Content-Type': 'application/pdf' },
         body: pdfBuffer,
       });
       if (upRes.ok) publicUrl = `${SB_URL}/storage/v1/object/public/invoices/${fileName}`;
@@ -1417,7 +1417,7 @@ async function handleInvoiceToWA(chatId, orderId) {
     const fileName = `Invoice-${orderId}-${Date.now()}.pdf`;
     const upRes = await fetch(`${SB_URL}/storage/v1/object/invoices/${fileName}`, {
       method: 'POST',
-      headers: { ...sbHeaders(), Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/pdf' },
+      headers: { ...sbHeaders(), 'Content-Type': 'application/pdf' },
       body: pdfBuffer,
     });
     if (!upRes.ok) {
@@ -1569,7 +1569,7 @@ async function handleFotoOtomatis(chatId, msg, captionText) {
         const imgName = `resi-${order.id}-${Date.now()}.jpg`;
         const upImg = await fetch(`${SB_URL}/storage/v1/object/invoices/${imgName}`, {
           method: 'POST',
-          headers: { ...sbHeaders(), Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'image/jpeg' },
+          headers: { ...sbHeaders(), 'Content-Type': 'image/jpeg' },
           body: imgBuf,
         });
         if (upImg.ok) imgPublicUrl = `${SB_URL}/storage/v1/object/public/invoices/${imgName}`;
@@ -1702,7 +1702,7 @@ async function handleTemplateOrder(chatId, text) {
         });
         const fileName = `Invoice-${idPesanan}-${Date.now()}.pdf`;
         const upR = await fetch(`${SB_URL}/storage/v1/object/invoices/${fileName}`, {
-          method: 'POST', headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/pdf' }, body: pdfBuffer,
+          method: 'POST', headers: { apikey: SB_KEY, 'Content-Type': 'application/pdf' }, body: pdfBuffer,
         });
         if (upR.ok) {
           const publicUrl = `${SB_URL}/storage/v1/object/public/invoices/${fileName}`;

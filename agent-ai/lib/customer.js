@@ -659,7 +659,7 @@ async function handleCustomerPhoto(userId, fileId) {
         const pdfBuffer = await generateInvoice({ ...orders[0], items });
         const fileName = `Invoice-${d.order_id}-${Date.now()}.pdf`;
         const upR = await fetch(`${SB_URL2}/storage/v1/object/invoices/${fileName}`, {
-          method: 'POST', headers: { apikey: SB_KEY2, Authorization: `Bearer ${SB_KEY2}`, 'Content-Type': 'application/pdf' }, body: pdfBuffer,
+          method: 'POST', headers: { apikey: SB_KEY2, 'Content-Type': 'application/pdf' }, body: pdfBuffer,
         });
         if (upR.ok) {
           const publicUrl = `${SB_URL2}/storage/v1/object/public/invoices/${fileName}`;
